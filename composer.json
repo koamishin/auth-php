@@ -1,0 +1,58 @@
+{
+    "name": "koamishin/auth-php",
+    "description": "Official PHP and Laravel SDK for Koamishin Centralized Authentication Portal with OAuth2, OIDC, and realtime webhooks.",
+    "type": "library",
+    "license": "MIT",
+    "homepage": "https://github.com/koamishin/auth-php",
+    "support": {
+        "issues": "https://github.com/koamishin/auth-php/issues",
+        "source": "https://github.com/koamishin/auth-php"
+    },
+    "keywords": [
+        "koamishin",
+        "auth",
+        "sso",
+        "oauth2",
+        "oidc",
+        "pkce",
+        "laravel",
+        "authentication",
+        "webhooks",
+        "svix",
+        "clerk-alternative"
+    ],
+    "authors": [
+        {
+            "name": "Yukazakiri",
+            "email": "marianolouis18@gmail.com",
+            "role": "Maintainer"
+        },
+        {
+            "name": "Koamishin Core Team",
+            "homepage": "https://github.com/koamishin"
+        }
+    ],
+    "require": {
+        "php": "^8.2|^8.3|^8.4|^8.5",
+        "illuminate/support": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/http": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/session": "^10.0|^11.0|^12.0|^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Koamishin\\Auth\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Koamishin\\Auth\\KoamishinServiceProvider"
+            ],
+            "aliases": {
+                "Koamishin": "Koamishin\\Auth\\Facades\\Koamishin"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
