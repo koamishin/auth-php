@@ -1,6 +1,6 @@
 {
     "name": "koamishin/auth-php",
-    "description": "Official PHP and Laravel SDK for Koamishin Centralized Authentication Portal with OAuth2, OIDC, and realtime webhooks.",
+    "description": "Official Laravel SDK for Koamishin Portal with OAuth 2.0 login, management APIs, and webhook verification.",
     "type": "library",
     "license": "MIT",
     "homepage": "https://github.com/koamishin/auth-php",
@@ -13,7 +13,6 @@
         "auth",
         "sso",
         "oauth2",
-        "oidc",
         "pkce",
         "laravel",
         "authentication",

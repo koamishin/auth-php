@@ -6,6 +6,7 @@ namespace Koamishin\Auth\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Koamishin\Auth\Facades\Koamishin;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -16,14 +17,16 @@ class AuthenticateWithKoamishin
      */
     public function handle(Request $request, Closure $next, ?string $role = null): Response
     {
-        $user = Koamishin::user();
+        $user = $request->headers->has('Authorization')
+            ? Koamishin::userForToken((string) $request->bearerToken())
+            : Koamishin::user();
 
         if (! $user) {
             if ($request->expectsJson()) {
                 return response()->json(['message' => 'Unauthenticated.'], 401);
             }
 
-            return redirect()->away(Koamishin::getLoginUrl($request->fullUrl()));
+            return redirect()->away(Koamishin::getLoginUrl($request->getRequestUri()));
         }
 
         if ($role && ! $user->hasRole($role)) {
@@ -33,6 +36,10 @@ class AuthenticateWithKoamishin
 
             abort(403, 'Unauthorized.');
         }
+
+        $request->setUserResolver(fn (?string $guard = null) => $guard === null || $guard === 'koamishin'
+            ? $user
+            : Auth::guard($guard)->user());
 
         return $next($request);
     }

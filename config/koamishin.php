@@ -26,7 +26,22 @@ return [
     'redirect_uri' => env('KOAMISHIN_REDIRECT_URI', 'http://localhost:3000/koamishin/callback'),
 
     /*
+     * Bind accepted identities to this Portal application and environment.
+     */
+    'application_id' => env('KOAMISHIN_APPLICATION_ID', ''),
+    'environment' => env('KOAMISHIN_ENVIRONMENT', ''),
+
+    /*
      * Webhook secret for validating incoming user sync events.
      */
     'webhook_secret' => env('KOAMISHIN_WEBHOOK_SECRET', ''),
+
+    // Legacy uses the literal secret. Standard expects a base64-encoded whsec_ secret.
+    'webhook_format' => env('KOAMISHIN_WEBHOOK_FORMAT', 'legacy'),
+
+    'scopes' => ['openid', 'profile', 'email', 'roles', 'metadata:public'],
+
+    // Use separate client-credentials credentials for the management API.
+    'management_client_id' => env('KOAMISHIN_MANAGEMENT_CLIENT_ID', ''),
+    'management_client_secret' => env('KOAMISHIN_MANAGEMENT_CLIENT_SECRET', ''),
 ];

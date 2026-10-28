@@ -11,8 +11,10 @@ use Koamishin\Auth\KoamishinAuth;
  * @method static string getLoginUrl(?string $returnTo = null)
  * @method static \Koamishin\Auth\KoamishinUser handleCallback(string $code, string $state)
  * @method static \Koamishin\Auth\KoamishinUser|null user()
+ * @method static \Koamishin\Auth\KoamishinUser|null userForToken(string $accessToken)
  * @method static bool check()
  * @method static void logout()
+ * @method static string consumeReturnTo(string $default = '/')
  *
  * @see KoamishinAuth
  */
