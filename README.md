@@ -125,6 +125,140 @@ The Portal validates the client and callback and applies the selected environmen
 
 For JSON API routes, `auth:koamishin` also accepts an `Authorization: Bearer <access-token>` header and validates it against the Portal. A request carrying an invalid bearer token is not allowed to fall back to a browser session. The guard provides a `KoamishinUser` implementing Laravel's authentication contract, not an Eloquent model; map the Portal user ID to a local model yourself if your application requires one.
 
+## Maintain a local Eloquent user projection
+
+Keep `KoamishinUser` as the authenticated Portal principal. If your application needs normal Eloquent relationships, create a local `users` row after the callback and identify it by a unique `koamishin_user_id`. This example assumes each application and environment has its own local database. The local row is a projection of selected Portal profile fields; it does not replace Portal authentication or store Portal passwords and tokens. App-owned records continue to reference the local `users.id`.
+
+Add a nullable external ID and the app/environment context to the local table. The sample requires the `email` claim because its local `users.email` column is required. Request the `email` scope and reject sign-in when that claim is empty. If the app only accepts Koamishin sign-in, make its local password column nullable as well; never copy or generate a password from Portal credentials. Before rolling back that migration, assign local passwords or remove passwordless projection rows so the original non-null password constraint can be restored.
+
+```php
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+Schema::table('users', function (Blueprint $table) {
+    $table->string('koamishin_user_id')->nullable()->unique();
+    $table->string('koamishin_application_id')->nullable();
+    $table->string('koamishin_environment')->nullable();
+    $table->json('koamishin_public_metadata')->nullable();
+    $table->string('password')->nullable()->change();
+});
+```
+
+Allow the projection fields in your local `User` model's mass-assignment configuration. The example below uses the Laravel 10–12 `$fillable` property; Laravel 13 also supports the `#[Fillable([...])]` model attribute used by the App A and App B examples. Cast public metadata to an array, and keep each application's usual relationships on that Eloquent model:
+
+```php
+use App\Models\Post;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+protected $fillable = [
+    'name',
+    'email',
+    'email_verified_at',
+    'koamishin_user_id',
+    'koamishin_application_id',
+    'koamishin_environment',
+    'koamishin_public_metadata',
+];
+
+protected function casts(): array
+{
+    return [
+        'koamishin_public_metadata' => 'array',
+    ];
+}
+
+public function posts(): HasMany
+{
+    return $this->hasMany(Post::class);
+}
+```
+
+Use an app-level service to validate the configured application context and create or find the projection by the unique Portal subject. Laravel's `firstOrCreate` handles concurrent creation against that unique key. Do not find or link local users by email alone: if a local account already owns that email, require a trusted, explicit account-linking flow. Define the conflict exception used below:
+
+```php
+// app/Exceptions/KoamishinIdentityConflict.php
+namespace App\Exceptions;
+
+use RuntimeException;
+
+final class KoamishinIdentityConflict extends RuntimeException {}
+```
+
+```php
+use App\Exceptions\KoamishinIdentityConflict;
+use App\Models\User;
+use InvalidArgumentException;
+use Koamishin\Auth\KoamishinUser;
+use RuntimeException;
+
+final class KoamishinUserProjector
+{
+    public function sync(KoamishinUser $identity): User
+    {
+        $applicationId = (string) config('koamishin.application_id');
+        $environment = (string) config('koamishin.environment');
+
+        if ($applicationId === '' || ! in_array($environment, ['development', 'production'], true)) {
+            throw new RuntimeException('Configure the Koamishin application ID and environment.');
+        }
+
+        if ($identity->applicationId !== $applicationId || $identity->environment !== $environment) {
+            throw new InvalidArgumentException('The Portal identity belongs to another application environment.');
+        }
+
+        if (trim($identity->email) === '') {
+            throw new InvalidArgumentException('The Portal email claim is required; request the email scope.');
+        }
+
+        $emailOwner = User::query()->where('email', $identity->email)->first();
+
+        if ($emailOwner !== null && $emailOwner->koamishin_user_id !== $identity->id) {
+            throw new KoamishinIdentityConflict('A local account already uses this email; link it explicitly before sign-in.');
+        }
+
+        $localUser = User::query()->firstOrCreate(
+            ['koamishin_user_id' => $identity->id],
+            [
+                'koamishin_application_id' => $identity->applicationId,
+                'koamishin_environment' => $identity->environment,
+                'koamishin_public_metadata' => $identity->publicMetadata,
+                'name' => $identity->name,
+                'email' => $identity->email,
+            ],
+        );
+
+        $localUser->fill([
+            'koamishin_user_id' => $identity->id,
+            'koamishin_application_id' => $identity->applicationId,
+            'koamishin_environment' => $identity->environment,
+            'koamishin_public_metadata' => $identity->publicMetadata,
+            'name' => $identity->name,
+            'email' => $identity->email,
+            'email_verified_at' => $identity->emailVerified ? ($localUser->email_verified_at ?? now()) : null,
+        ]);
+
+        if ($localUser->isDirty()) {
+            $localUser->save();
+        }
+
+        return $localUser;
+    }
+}
+```
+
+Call the projector with the result of the verified callback to create the local row immediately. The example copies the central email verification state to Laravel's `email_verified_at` field, preserves the original verification timestamp, and clears it if the Portal says the email is unverified. Sync again on protected requests or handle signed user update webhooks when the app needs changes reflected during an existing session:
+
+```php
+use Koamishin\Auth\Facades\Koamishin;
+
+$identity = Koamishin::handleCallback($input['code'], $input['state']);
+$localUser = app(KoamishinUserProjector::class)->sync($identity);
+
+$post = $localUser->posts()->create(['title' => 'App-owned content']);
+```
+
+Use `$request->user('koamishin')` for the current Portal identity and its app-scoped roles and permissions. Use the local `User` for app-owned Eloquent data. Public metadata is user-visible input and must not grant roles or permissions; keep private metadata behind the scoped management API. On an email conflict, clear the SDK session with `Koamishin::logout()` before returning an error. For a database shared across applications or environments, adapt the schema and every lookup to use a composite key of Portal user ID, application ID, and environment; the single-key code above is for an app-specific database.
+
 The package also ships optional role-checking middleware:
 
 ```php
