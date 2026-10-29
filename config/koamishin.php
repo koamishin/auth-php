@@ -31,6 +31,10 @@ return [
     'application_id' => env('KOAMISHIN_APPLICATION_ID', ''),
     'environment' => env('KOAMISHIN_ENVIRONMENT', ''),
 
+    /* Redirect the application's standard login and registration pages to the Portal. */
+    'hosted_auth_routes' => env('KOAMISHIN_HOSTED_AUTH_ROUTES', true),
+    'hosted_return_to' => env('KOAMISHIN_HOSTED_RETURN_TO'),
+
     /*
      * Webhook secret for validating incoming user sync events.
      */

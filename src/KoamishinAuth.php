@@ -31,6 +31,16 @@ class KoamishinAuth
 
     public function getLoginUrl(?string $returnTo = null): string
     {
+        return $this->authorizationUrl($returnTo, false);
+    }
+
+    public function getRegistrationUrl(?string $returnTo = null): string
+    {
+        return $this->authorizationUrl($returnTo, true);
+    }
+
+    private function authorizationUrl(?string $returnTo, bool $signup): string
+    {
         $this->validateApplicationContext();
 
         $state = bin2hex(random_bytes(16));
@@ -47,7 +57,7 @@ class KoamishinAuth
         ];
         Session::put('koamishin_oauth_transactions', $transactions);
 
-        $query = http_build_query([
+        $parameters = [
             'client_id' => $this->clientId,
             'redirect_uri' => $this->redirectUri,
             'response_type' => 'code',
@@ -55,14 +65,14 @@ class KoamishinAuth
             'state' => $state,
             'code_challenge' => $codeChallenge,
             'code_challenge_method' => 'S256',
-        ]);
+        ];
+        if ($signup) {
+            $parameters['screen_hint'] = 'signup';
+        }
+
+        $query = http_build_query($parameters);
 
         return "{$this->portalUrl}/oauth/authorize?{$query}";
-    }
-
-    public function getRegistrationUrl(?string $returnTo = null): string
-    {
-        return $this->getLoginUrl($returnTo).'&screen_hint=signup';
     }
 
     public function handleCallback(string $code, string $state): KoamishinUser

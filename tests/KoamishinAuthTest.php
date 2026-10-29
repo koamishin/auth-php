@@ -2,10 +2,14 @@
 
 declare(strict_types=1);
 
+use App\Http\Middleware\EnsureAuthenticationFeatures;
+use App\Http\Middleware\EnsureOAuthApplicationAccess;
+use App\Http\Middleware\HandleInertiaRequests;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Session;
 use Koamishin\Auth\KoamishinAuth;
 use Koamishin\Auth\KoamishinServiceProvider;
@@ -69,6 +73,7 @@ class KoamishinAuthTest extends TestCase
 
         $this->assertSame('https://portal.test/oauth/authorize', strtok($url, '?'));
         $this->assertSame('signup', $query['screen_hint']);
+        $this->assertArrayNotHasKey('flow', $query);
         $this->assertSame('client-id', $query['client_id']);
         $this->assertSame('https://client.test/callback', $query['redirect_uri']);
         $this->assertSame('S256', $query['code_challenge_method']);
@@ -88,9 +93,69 @@ class KoamishinAuthTest extends TestCase
         parse_str((string) parse_url($auth->getRegistrationUrl('/welcome'), PHP_URL_QUERY), $signup);
 
         $this->assertArrayNotHasKey('screen_hint', $login);
+        $this->assertArrayNotHasKey('flow', $login);
+        $this->assertArrayNotHasKey('flow', $signup);
         $this->assertNotSame($login['state'], $signup['state']);
         $this->assertSame('/orders', Session::get('koamishin_oauth_transactions')[$login['state']]['return_to']);
         $this->assertSame('/welcome', Session::get('koamishin_oauth_transactions')[$signup['state']]['return_to']);
+    }
+
+    public function test_standard_application_routes_redirect_to_hosted_authentication(): void
+    {
+        $this->withoutMiddleware([
+            HandleInertiaRequests::class,
+            EnsureAuthenticationFeatures::class,
+            EnsureOAuthApplicationAccess::class,
+        ]);
+        Route::middleware('web')->get('/login', fn () => response('local login'));
+        Route::middleware('web')->get('/register', fn () => response('local registration'));
+        Route::middleware('web')->post('/register', fn () => response('local registration submitted'));
+
+        foreach (['login', 'register'] as $route) {
+            $response = $this->get('/'.$route.'?return_to=%2Forders')->assertRedirect();
+            $url = (string) $response->headers->get('Location');
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            $this->assertSame('https://portal.test/oauth/authorize', strtok($url, '?'));
+            $this->assertArrayNotHasKey('flow', $query);
+            $this->assertSame($route === 'register' ? 'signup' : null, $query['screen_hint'] ?? null);
+            $this->assertSame('/orders', Session::get('koamishin_oauth_transactions')[$query['state']]['return_to']);
+        }
+
+        $this->post('/register')->assertStatus(405);
+    }
+
+    public function test_hosted_route_overrides_can_be_disabled_for_an_application(): void
+    {
+        $this->withoutMiddleware([
+            HandleInertiaRequests::class,
+            EnsureAuthenticationFeatures::class,
+            EnsureOAuthApplicationAccess::class,
+        ]);
+        config(['koamishin.hosted_auth_routes' => false]);
+        Route::middleware('web')->get('/register', fn () => response('local registration'));
+
+        $this->get('/register')->assertOk()->assertSee('local registration');
+    }
+
+    public function test_logout_only_clears_the_local_koamishin_session(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+        Session::put('koamishin_user_id', 'user-1');
+        Session::put('koamishin_access_token', Crypt::encryptString('access-token'));
+        Session::put('koamishin_refresh_token', Crypt::encryptString('refresh-token'));
+        Session::put('koamishin_token_expires_at', time() + 60);
+        Session::put('unrelated_application_data', 'preserved');
+        $sessionId = Session::getId();
+
+        app(KoamishinAuth::class)->logout();
+
+        $this->assertFalse(Session::has('koamishin_access_token'));
+        $this->assertFalse(Session::has('koamishin_refresh_token'));
+        $this->assertFalse(Session::has('koamishin_user_id'));
+        $this->assertSame('preserved', Session::get('unrelated_application_data'));
+        $this->assertNotSame($sessionId, Session::getId());
+        Http::assertNothingSent();
     }
 
     public function test_callback_rejects_invalid_state_before_requesting_tokens(): void

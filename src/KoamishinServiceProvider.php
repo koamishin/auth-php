@@ -6,7 +6,9 @@ namespace Koamishin\Auth;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
+use Koamishin\Auth\Middleware\RedirectToHostedAuthentication;
 
 class KoamishinServiceProvider extends ServiceProvider
 {
@@ -41,6 +43,15 @@ class KoamishinServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        $this->app['router']->pushMiddlewareToGroup('web', RedirectToHostedAuthentication::class);
+
+        if (! $this->app->routesAreCached()) {
+            Route::middleware('web')->group(function (): void {
+                Route::get('/login', [RedirectToHostedAuthentication::class, 'fallback'])->name('login');
+                Route::get('/register', [RedirectToHostedAuthentication::class, 'fallback'])->name('register');
+            });
+        }
+
         Auth::viaRequest('koamishin', function (Request $request): ?KoamishinUser {
             $auth = $this->app->make(KoamishinAuth::class);
             if ($request->headers->has('Authorization')) {

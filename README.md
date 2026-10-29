@@ -57,24 +57,18 @@ Register the guard in `config/auth.php`:
 ],
 ```
 
-The SDK registers its provider automatically in a standard Laravel installation. It does not create routes, views, or local user records for you.
+The SDK registers its provider automatically in a standard Laravel installation. When an authorization client is configured, it redirects the application's `/login` and `/register` web routes to the Portal, including when the application already defines those routes. Local POST requests to those two routes are rejected. It does not create a callback route, views, or local user records for you.
+
+Set `KOAMISHIN_HOSTED_RETURN_TO=/dashboard` to choose a local path after sign-in, or pass a local `return_to` query parameter on the application's login or registration URL. External return URLs are rejected. To keep existing application routes instead, set `KOAMISHIN_HOSTED_AUTH_ROUTES=false` and define the redirects yourself. Refresh the configuration and route caches after changing these settings.
 
 ## Sign in and protect routes
 
-Add routes to your application's `routes/web.php`. These routes require Laravel's `web` middleware because the OAuth transaction and resulting tokens live in the session. The `login` route name lets Laravel's built-in authentication middleware redirect unauthenticated browser requests.
+Add the callback and protected routes to your application's `routes/web.php`. These routes require Laravel's `web` middleware because the OAuth transaction and resulting tokens live in the session. The SDK supplies the standard `login` and `register` entry points.
 
 ```php
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Koamishin\Auth\Facades\Koamishin;
-
-Route::get('/register', function () {
-    return redirect()->away(Koamishin::getRegistrationUrl('/dashboard'));
-})->name('register');
-
-Route::get('/login', function () {
-    return redirect()->away(Koamishin::getLoginUrl('/dashboard'));
-})->name('login');
 
 Route::get('/koamishin/callback', function (Request $request) {
     if ($request->query('error')) {
@@ -116,6 +110,8 @@ Route::post('/logout', function () {
 Submit the logout route from a POST form with Laravel's `@csrf` directive. Logout clears the local application's Koamishin session and rotates its session ID. It does **not** revoke the Portal token or end the user's Portal browser session.
 
 `getLoginUrl()` stores a random state and PKCE verifier in the session. `getRegistrationUrl()` creates the same OAuth transaction and adds `screen_hint=signup`, allowing the Portal to show the requesting application's registration page and retain its callback. Use this method for an app's Register link: a redirect straight to the generic Portal `/register` page does not start an OAuth transaction and cannot authenticate the user back to that app.
+
+By default, each new application login requires authentication on the Portal, even when the browser has a Portal session or is signed into another application. Administrators can opt applications into SSO in the Portal. The SDK maintains a separate local session for each consuming application; a local logout does not log the user out of the other applications. When using social login, the external provider may reuse its own session.
 
 The Portal validates the client and callback and applies the selected environment's enrollment policy. With self-service enrollment enabled, a new account can register and authorize the requesting application, then return through the same callback. Other applications and environments keep their own memberships and metadata. A closed application requires operator enrollment. Registration does not let the browser assign private metadata, application roles, or permissions.
 
