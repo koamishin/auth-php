@@ -54,6 +54,45 @@ class KoamishinAuthTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/oauth/token' && $request['code'] === 'code' && strlen($request['code_verifier']) === 64);
     }
 
+    public function test_registration_url_preserves_the_oauth_transaction_through_callback(): void
+    {
+        Http::fake([
+            'https://portal.test/oauth/token' => Http::response(['access_token' => 'signup-access', 'refresh_token' => 'signup-refresh', 'expires_in' => 60]),
+            'https://portal.test/api/oauth/userinfo' => Http::response(['sub' => 'signup-user', 'application_id' => '100', 'environment' => 'production', 'public_metadata' => ['theme' => 'dark']]),
+        ]);
+        $auth = app(KoamishinAuth::class);
+
+        $url = $auth->getRegistrationUrl('/welcome');
+        parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+        $transaction = Session::get('koamishin_oauth_transactions')[$query['state']];
+        $user = $auth->handleCallback('signup-code', $query['state']);
+
+        $this->assertSame('https://portal.test/oauth/authorize', strtok($url, '?'));
+        $this->assertSame('signup', $query['screen_hint']);
+        $this->assertSame('client-id', $query['client_id']);
+        $this->assertSame('https://client.test/callback', $query['redirect_uri']);
+        $this->assertSame('S256', $query['code_challenge_method']);
+        $this->assertSame(rtrim(strtr(base64_encode(hash('sha256', $transaction['verifier'], true)), '+/', '-_'), '='), $query['code_challenge']);
+        $this->assertSame('signup-user', $user->id);
+        $this->assertSame(['theme' => 'dark'], $user->publicMetadata);
+        $this->assertSame('/welcome', $auth->consumeReturnTo());
+        $this->assertArrayNotHasKey($query['state'], Session::get('koamishin_oauth_transactions'));
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/oauth/token' && $request['code_verifier'] === $transaction['verifier'] && $request['code'] === 'signup-code');
+    }
+
+    public function test_starting_registration_keeps_an_existing_login_transaction(): void
+    {
+        $auth = app(KoamishinAuth::class);
+        parse_str((string) parse_url($auth->getLoginUrl('/orders'), PHP_URL_QUERY), $login);
+
+        parse_str((string) parse_url($auth->getRegistrationUrl('/welcome'), PHP_URL_QUERY), $signup);
+
+        $this->assertArrayNotHasKey('screen_hint', $login);
+        $this->assertNotSame($login['state'], $signup['state']);
+        $this->assertSame('/orders', Session::get('koamishin_oauth_transactions')[$login['state']]['return_to']);
+        $this->assertSame('/welcome', Session::get('koamishin_oauth_transactions')[$signup['state']]['return_to']);
+    }
+
     public function test_callback_rejects_invalid_state_before_requesting_tokens(): void
     {
         Http::fake(['https://portal.test/oauth/token' => Http::response()]);

@@ -7,7 +7,7 @@ The features in this README describe the source in this checkout. A package vers
 ## Before you begin
 
 1. Deploy a Portal version that includes the SDK's application-scoped API. Create an organization, an application, and the desired `development` or `production` environment.
-2. Create an authorization-code OAuth client for that application environment. Register the **exact** callback URL of your Laravel app. Enroll the user in both the organization and that application environment before signing in.
+2. Create an authorization-code OAuth client for that application environment. Register the **exact** callback URL of your Laravel app. Enroll the user in both the organization and that application environment, or explicitly enable the Portal environment's self-service enrollment policy.
 3. Create a separate management client if your server needs to read users or manage metadata. Authorization-code credentials and management credentials are not interchangeable.
 4. Use HTTPS for the Portal and the client application in production. Configure Laravel's application key, a session store, and secure session cookies. Never expose either client secret in frontend JavaScript, a mobile app, a repository, or a URL.
 
@@ -68,6 +68,10 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Koamishin\Auth\Facades\Koamishin;
 
+Route::get('/register', function () {
+    return redirect()->away(Koamishin::getRegistrationUrl('/dashboard'));
+})->name('register');
+
 Route::get('/login', function () {
     return redirect()->away(Koamishin::getLoginUrl('/dashboard'));
 })->name('login');
@@ -111,7 +115,11 @@ Route::post('/logout', function () {
 
 Submit the logout route from a POST form with Laravel's `@csrf` directive. Logout clears the local application's Koamishin session and rotates its session ID. It does **not** revoke the Portal token or end the user's Portal browser session.
 
-`getLoginUrl()` stores a random state and PKCE verifier in the session. `handleCallback()` validates and consumes that state, exchanges the code, rotates the session ID, and stores encrypted access and refresh tokens. `user()` rechecks userinfo and refreshes an expired access token when possible. If the Portal denies the token, the local Koamishin session is cleared. Protect the session and `APP_KEY`; rotating the application key invalidates the encrypted tokens.
+`getLoginUrl()` stores a random state and PKCE verifier in the session. `getRegistrationUrl()` creates the same OAuth transaction and adds `screen_hint=signup`, allowing the Portal to show the requesting application's registration page and retain its callback. Use this method for an app's Register link: a redirect straight to the generic Portal `/register` page does not start an OAuth transaction and cannot authenticate the user back to that app.
+
+The Portal validates the client and callback and applies the selected environment's enrollment policy. With self-service enrollment enabled, a new account can register and authorize the requesting application, then return through the same callback. Other applications and environments keep their own memberships and metadata. A closed application requires operator enrollment. Registration does not let the browser assign private metadata, application roles, or permissions.
+
+`handleCallback()` validates and consumes the OAuth state, exchanges the code, rotates the session ID, and stores encrypted access and refresh tokens. `user()` rechecks userinfo and refreshes an expired access token when possible. If the Portal denies the token, the local Koamishin session is cleared. Protect the session and `APP_KEY`; rotating the application key invalidates the encrypted tokens.
 
 `consumeReturnTo()` only accepts local paths, falling back to `/` when necessary. Avoid overriding that check with an arbitrary `redirect()->away()` based on user input. When concurrent requests can refresh the same session, use Laravel session blocking with a shared lock-capable cache for the relevant routes; otherwise concurrent session writes or refreshes can race.
 

@@ -60,6 +60,11 @@ class KoamishinAuth
         return "{$this->portalUrl}/oauth/authorize?{$query}";
     }
 
+    public function getRegistrationUrl(?string $returnTo = null): string
+    {
+        return $this->getLoginUrl($returnTo).'&screen_hint=signup';
+    }
+
     public function handleCallback(string $code, string $state): KoamishinUser
     {
         $transactions = Session::get('koamishin_oauth_transactions', []);

@@ -9,6 +9,7 @@ use Koamishin\Auth\KoamishinAuth;
 
 /**
  * @method static string getLoginUrl(?string $returnTo = null)
+ * @method static string getRegistrationUrl(?string $returnTo = null)
  * @method static \Koamishin\Auth\KoamishinUser handleCallback(string $code, string $state)
  * @method static \Koamishin\Auth\KoamishinUser|null user()
  * @method static \Koamishin\Auth\KoamishinUser|null userForToken(string $accessToken)
