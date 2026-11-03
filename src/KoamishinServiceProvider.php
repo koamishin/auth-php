@@ -27,6 +27,8 @@ class KoamishinServiceProvider extends ServiceProvider
                 scopes: is_array($config['scopes'] ?? null) ? $config['scopes'] : ['openid', 'profile', 'email', 'roles', 'metadata:public'],
                 applicationId: (string) ($config['application_id'] ?? ''),
                 environment: (string) ($config['environment'] ?? ''),
+                publishableKey: (string) ($config['publishable_key'] ?? ''),
+                secretKey: (string) ($config['secret_key'] ?? ''),
             );
         });
 
@@ -37,6 +39,7 @@ class KoamishinServiceProvider extends ServiceProvider
                 portalUrl: (string) ($config['portal_url'] ?? ''),
                 clientId: (string) ($config['management_client_id'] ?? ''),
                 clientSecret: (string) ($config['management_client_secret'] ?? ''),
+                secretKey: (string) ($config['secret_key'] ?? ''),
             );
         });
     }

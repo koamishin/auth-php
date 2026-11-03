@@ -10,6 +10,13 @@ return [
     'portal_url' => env('KOAMISHIN_PORTAL_URL', 'http://localhost:8000'),
 
     /*
+     * Publishable Key (pk_test_... / pk_live_...) and Secret Key (sk_test_... / sk_live_...)
+     * for this application environment.
+     */
+    'publishable_key' => env('KOAMISHIN_PUBLISHABLE_KEY', ''),
+    'secret_key' => env('KOAMISHIN_SECRET_KEY', ''),
+
+    /*
      * Client ID registered in Koamishin Portal (Filament OAuth Clients).
      */
     'client_id' => env('KOAMISHIN_CLIENT_ID', ''),

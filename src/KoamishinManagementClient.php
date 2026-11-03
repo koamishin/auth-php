@@ -12,8 +12,9 @@ class KoamishinManagementClient
 {
     public function __construct(
         protected string $portalUrl,
-        protected string $clientId,
-        protected string $clientSecret,
+        protected string $clientId = '',
+        protected string $clientSecret = '',
+        protected string $secretKey = '',
     ) {
         $this->portalUrl = rtrim($portalUrl, '/');
     }
@@ -156,19 +157,39 @@ class KoamishinManagementClient
      */
     protected function request(string $method, string $path, string $scope, array $payload = []): array
     {
-        if ($this->portalUrl === '' || $this->clientId === '' || $this->clientSecret === '') {
+        $clientId = trim($this->clientId);
+        $clientSecret = trim($this->clientSecret);
+        $secretKey = trim($this->secretKey);
+
+        if (str_starts_with($secretKey, 'pk_')
+            || str_starts_with($clientSecret, 'pk_')
+            || str_starts_with($clientId, 'pk_')) {
+            throw new RuntimeException('A Koamishin publishable key cannot be used for Management API authentication.');
+        }
+
+        if (($clientId === '') !== ($clientSecret === '')) {
             throw new RuntimeException('Management API credentials are not configured.');
         }
 
-        $tokenResponse = Http::connectTimeout(3)->timeout(10)->asForm()->post("{$this->portalUrl}/oauth/token", [
-            'grant_type' => 'client_credentials',
-            'client_id' => $this->clientId,
-            'client_secret' => $this->clientSecret,
-            'scope' => $scope,
-        ]);
-        $token = $tokenResponse->json('access_token');
-        if (! $tokenResponse->successful() || ! is_string($token) || $token === '') {
-            throw new RuntimeException('Management API token request failed.');
+        if ($this->portalUrl !== '' && $clientId !== '' && $clientSecret !== '') {
+            $tokenResponse = Http::connectTimeout(3)->timeout(10)->asForm()->post("{$this->portalUrl}/oauth/token", [
+                'grant_type' => 'client_credentials',
+                'client_id' => $clientId,
+                'client_secret' => $clientSecret,
+                'scope' => $scope,
+            ]);
+            $token = $tokenResponse->json('access_token');
+            if (! $tokenResponse->successful() || ! is_string($token) || $token === '') {
+                throw new RuntimeException('Management API token request failed.');
+            }
+        } elseif ($this->portalUrl !== '' && $secretKey !== '') {
+            if (preg_match('/\Ask_(test|live)_[A-Za-z0-9_-]+\z/', $secretKey) !== 1) {
+                throw new RuntimeException('Invalid Koamishin secret key format.');
+            }
+
+            $token = $secretKey;
+        } else {
+            throw new RuntimeException('Management API credentials are not configured.');
         }
 
         $client = Http::connectTimeout(3)->timeout(10)->acceptJson()->withToken($token);

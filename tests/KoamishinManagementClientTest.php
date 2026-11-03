@@ -158,4 +158,116 @@ class KoamishinManagementClientTest extends TestCase
             Http::assertNothingSent();
         }
     }
+
+    public function test_authenticates_management_requests_directly_with_a_secret_key(): void
+    {
+        config([
+            'koamishin.management_client_id' => '',
+            'koamishin.management_client_secret' => '',
+            'koamishin.secret_key' => 'sk_live_backend_123',
+        ]);
+        Http::fake([
+            'https://portal.test/api/v1/users/42/metadata' => Http::response(['data' => ['public' => ['plan' => 'pro'], 'private' => []]]),
+            'https://portal.test/api/v1/users*' => Http::response(['data' => [['id' => 42, 'name' => 'Example', 'email' => 'user@example.test']], 'links' => [], 'meta' => ['current_page' => 1]]),
+            'https://portal.test/api/v1/organization' => Http::sequence()
+                ->push(['data' => ['id' => '10', 'name' => 'Example', 'slug' => 'example', 'application_id' => '100', 'environment' => 'production']])
+                ->push(['data' => ['id' => '10', 'name' => 'Example', 'slug' => 'example', 'application_id' => '100', 'environment' => 'development']]),
+        ]);
+
+        $client = app(KoamishinManagementClient::class);
+        $users = $client->listUsers();
+        $organization = $client->getOrganization();
+        $metadata = $client->updateUserMetadata('42', public: ['plan' => 'pro']);
+        $testOrganization = (new KoamishinManagementClient('https://portal.test', secretKey: 'sk_test_backend_456'))->getOrganization();
+
+        $this->assertSame('42', $users['data'][0]->id);
+        $this->assertSame('production', $organization['environment']);
+        $this->assertSame(['public' => ['plan' => 'pro'], 'private' => []], $metadata);
+        $this->assertSame('development', $testOrganization['environment']);
+        Http::assertNotSent(fn ($request): bool => $request->url() === 'https://portal.test/oauth/token');
+        Http::assertSent(fn ($request): bool => str_starts_with($request->url(), 'https://portal.test/api/v1/users?') && $request->hasHeader('Authorization', 'Bearer sk_live_backend_123'));
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/api/v1/users/42/metadata' && $request->method() === 'PATCH' && $request->hasHeader('Authorization', 'Bearer sk_live_backend_123'));
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/api/v1/organization' && $request->hasHeader('Authorization', 'Bearer sk_test_backend_456'));
+    }
+
+    public function test_prefers_explicit_management_client_credentials_when_secret_key_is_also_configured(): void
+    {
+        config([
+            'koamishin.management_client_id' => 'management-id',
+            'koamishin.management_client_secret' => 'management-secret',
+            'koamishin.secret_key' => 'sk_live_backend_123',
+        ]);
+        Http::fake([
+            'https://portal.test/oauth/token' => Http::response(['access_token' => 'machine-token']),
+            'https://portal.test/api/v1/organization' => Http::response(['data' => [
+                'id' => '10',
+                'name' => 'Example',
+                'slug' => 'example',
+                'application_id' => '100',
+                'environment' => 'production',
+            ]]),
+        ]);
+
+        $organization = app(KoamishinManagementClient::class)->getOrganization();
+
+        $this->assertSame('10', $organization['id']);
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/oauth/token' && $request['client_id'] === 'management-id' && $request['scope'] === 'organization:read');
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/api/v1/organization' && $request->hasHeader('Authorization', 'Bearer machine-token'));
+    }
+
+    public function test_incomplete_management_credentials_do_not_fall_back_to_the_environment_secret(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+
+        foreach ([
+            new KoamishinManagementClient('https://portal.test', clientId: 'management-id', secretKey: 'sk_live_backend_123'),
+            new KoamishinManagementClient('https://portal.test', clientSecret: 'management-secret', secretKey: 'sk_live_backend_123'),
+        ] as $client) {
+            try {
+                $client->listUsers();
+                $this->fail('Incomplete scoped credentials fell back to the environment secret.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('Management API credentials are not configured.', $exception->getMessage());
+            }
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_rejects_publishable_keys_for_management_authentication_before_sending_a_request(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+
+        foreach ([
+            new KoamishinManagementClient('https://portal.test', secretKey: 'pk_test_123'),
+            new KoamishinManagementClient('https://portal.test', secretKey: 'pk_live_123'),
+            new KoamishinManagementClient('https://portal.test', clientId: 'pk_live_123', clientSecret: 'management-secret'),
+            new KoamishinManagementClient('https://portal.test', clientId: 'management-id', clientSecret: 'pk_test_123'),
+        ] as $client) {
+            try {
+                $client->listUsers();
+                $this->fail('A publishable key was accepted for Management API authentication.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('A Koamishin publishable key cannot be used for Management API authentication.', $exception->getMessage());
+            }
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_rejects_malformed_secret_keys_before_sending_a_request(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+
+        foreach (['sk_staging_123', 'sk_live_', 'invalid-secret', 'sk_test_bad space'] as $secretKey) {
+            try {
+                (new KoamishinManagementClient('https://portal.test', secretKey: $secretKey))->getOrganization();
+                $this->fail('A malformed secret key was accepted.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('Invalid Koamishin secret key format.', $exception->getMessage());
+            }
+        }
+
+        Http::assertNothingSent();
+    }
 }

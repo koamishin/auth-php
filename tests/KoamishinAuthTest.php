@@ -328,4 +328,223 @@ class KoamishinAuthTest extends TestCase
         Session::put('koamishin_return_to', '/%2f%2fevil.test');
         $this->assertSame('/', app(KoamishinAuth::class)->consumeReturnTo());
     }
+
+    public function test_publishable_and_secret_keys_authenticate_and_refresh_with_inferred_environment(): void
+    {
+        config([
+            'koamishin.client_id' => '',
+            'koamishin.client_secret' => '',
+            'koamishin.publishable_key' => 'pk_live_app100',
+            'koamishin.secret_key' => 'sk_live_app100',
+            'koamishin.environment' => '',
+        ]);
+        Http::fake([
+            'https://portal.test/oauth/token' => Http::sequence()
+                ->push(['access_token' => 'live-access', 'refresh_token' => 'live-refresh', 'expires_in' => 60])
+                ->push(['access_token' => 'refreshed-access', 'refresh_token' => 'refreshed-refresh', 'expires_in' => 60]),
+            'https://portal.test/api/oauth/userinfo' => Http::sequence()
+                ->push(['sub' => 'user-1', 'application_id' => '100', 'environment' => 'production', 'email' => 'user@example.test'])
+                ->push(['sub' => 'user-1', 'application_id' => '100', 'environment' => 'production', 'email' => 'user@example.test'])
+                ->push(['sub' => 'user-1', 'application_id' => '100', 'environment' => 'development', 'email' => 'user@example.test']),
+        ]);
+
+        $auth = app(KoamishinAuth::class);
+        $this->assertTrue($auth->isConfigured());
+        $this->assertSame('production', $auth->resolvedEnvironment());
+
+        parse_str((string) parse_url($auth->getRegistrationUrl('/welcome'), PHP_URL_QUERY), $signupQuery);
+        $this->assertSame('pk_live_app100', $signupQuery['client_id']);
+        $this->assertSame('signup', $signupQuery['screen_hint']);
+
+        parse_str((string) parse_url($auth->getLoginUrl('/orders'), PHP_URL_QUERY), $loginQuery);
+        $this->assertSame('pk_live_app100', $loginQuery['client_id']);
+        $this->assertArrayNotHasKey('screen_hint', $loginQuery);
+
+        $user = $auth->handleCallback('auth-code', $loginQuery['state']);
+        $this->assertSame('user-1', $user->id);
+        $this->assertSame('/orders', $auth->consumeReturnTo());
+
+        Session::put('koamishin_token_expires_at', time() - 1);
+        $refreshedUser = $auth->user();
+        $this->assertSame('user-1', $refreshedUser?->id);
+        $this->assertSame('refreshed-refresh', Crypt::decryptString(Session::get('koamishin_refresh_token')));
+        $this->assertNull($auth->userForToken('wrong-environment-token'));
+
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/oauth/token'
+            && $request['grant_type'] === 'authorization_code'
+            && $request['client_id'] === 'pk_live_app100'
+            && $request['client_secret'] === 'sk_live_app100'
+            && $request['code'] === 'auth-code');
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/oauth/token'
+            && $request['grant_type'] === 'refresh_token'
+            && $request['client_id'] === 'pk_live_app100'
+            && $request['client_secret'] === 'sk_live_app100'
+            && $request['refresh_token'] === 'live-refresh');
+
+        $developmentAuth = new KoamishinAuth(
+            portalUrl: 'https://portal.test',
+            redirectUri: 'https://client.test/callback',
+            applicationId: '100',
+            publishableKey: 'pk_test_app100',
+            secretKey: 'sk_test_app100',
+        );
+        $this->assertSame('development', $developmentAuth->resolvedEnvironment());
+    }
+
+    public function test_hosted_routes_redirect_when_only_publishable_key_is_configured(): void
+    {
+        $this->withoutMiddleware([
+            HandleInertiaRequests::class,
+            EnsureAuthenticationFeatures::class,
+            EnsureOAuthApplicationAccess::class,
+        ]);
+        config([
+            'koamishin.client_id' => '',
+            'koamishin.client_secret' => '',
+            'koamishin.publishable_key' => 'pk_test_app100',
+            'koamishin.secret_key' => 'sk_test_app100',
+            'koamishin.environment' => '',
+        ]);
+        Route::middleware('web')->get('/login', fn () => response('local login'));
+        Route::middleware('web')->get('/register', fn () => response('local registration'));
+        Route::middleware('web')->post('/register', fn () => response('local registration submitted'));
+
+        foreach (['login', 'register'] as $route) {
+            $response = $this->get('/'.$route.'?return_to=%2Forders')->assertRedirect();
+            $url = (string) $response->headers->get('Location');
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            $this->assertSame('https://portal.test/oauth/authorize', strtok($url, '?'));
+            $this->assertSame('pk_test_app100', $query['client_id']);
+            $this->assertSame($route === 'register' ? 'signup' : null, $query['screen_hint'] ?? null);
+            $this->assertSame('/orders', Session::get('koamishin_oauth_transactions')[$query['state']]['return_to']);
+        }
+
+        $this->post('/register')->assertStatus(405);
+    }
+
+    public function test_conflicting_publishable_key_and_client_id_are_rejected_before_sending_a_request(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+        config([
+            'koamishin.publishable_key' => 'pk_live_app100',
+            'koamishin.client_id' => 'legacy-client-id',
+        ]);
+
+        try {
+            app(KoamishinAuth::class)->getLoginUrl('/orders');
+            $this->fail('Conflicting publishable key and client ID were accepted.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Configure either KOAMISHIN_PUBLISHABLE_KEY or KOAMISHIN_CLIENT_ID, not conflicting values.', $exception->getMessage());
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_cross_environment_key_and_configuration_mismatches_are_rejected(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+
+        $mixedKeys = new KoamishinAuth(
+            portalUrl: 'https://portal.test',
+            redirectUri: 'https://client.test/callback',
+            applicationId: '100',
+            publishableKey: 'pk_test_app100',
+            secretKey: 'sk_live_app100',
+        );
+
+        foreach ([
+            fn () => $mixedKeys->getLoginUrl(),
+            fn () => $mixedKeys->handleCallback('code', str_repeat('a', 32)),
+        ] as $operation) {
+            try {
+                $operation();
+                $this->fail('Mismatched publishable and secret key environments were accepted.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('Koamishin publishable key and secret key environments do not match.', $exception->getMessage());
+            }
+        }
+
+        $mismatchedConfig = new KoamishinAuth(
+            portalUrl: 'https://portal.test',
+            redirectUri: 'https://client.test/callback',
+            applicationId: '100',
+            environment: 'production',
+            publishableKey: 'pk_test_app100',
+            secretKey: 'sk_test_app100',
+        );
+
+        foreach ([
+            fn () => $mismatchedConfig->getLoginUrl(),
+            fn () => $mismatchedConfig->userForToken('valid-token'),
+        ] as $operation) {
+            try {
+                $operation();
+                $this->fail('Mismatched configured environment was accepted.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('Configured Koamishin environment does not match the key environment.', $exception->getMessage());
+            }
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_swapped_publishable_and_secret_key_types_are_rejected_before_sending_a_request(): void
+    {
+        Http::fake(['https://portal.test/*' => Http::response()]);
+
+        foreach ([
+            new KoamishinAuth(
+                portalUrl: 'https://portal.test',
+                redirectUri: 'https://client.test/callback',
+                applicationId: '100',
+                publishableKey: 'sk_live_secret',
+            ),
+            new KoamishinAuth(
+                portalUrl: 'https://portal.test',
+                clientId: 'sk_test_secret',
+                redirectUri: 'https://client.test/callback',
+                applicationId: '100',
+            ),
+        ] as $secretAsPublic) {
+            foreach ([
+                fn () => $secretAsPublic->getLoginUrl(),
+                fn () => $secretAsPublic->handleCallback('code', str_repeat('a', 32)),
+            ] as $operation) {
+                try {
+                    $operation();
+                    $this->fail('A secret key was accepted as a publishable key or client ID.');
+                } catch (RuntimeException $exception) {
+                    $this->assertSame('A Koamishin secret key cannot be used as a publishable key or client ID.', $exception->getMessage());
+                }
+            }
+        }
+
+        Session::put('koamishin_user_id', 'user-1');
+        Session::put('koamishin_access_token', Crypt::encryptString('expired-token'));
+        Session::put('koamishin_refresh_token', Crypt::encryptString('old-refresh'));
+        Session::put('koamishin_token_expires_at', time() - 1);
+
+        $publicAsSecret = new KoamishinAuth(
+            portalUrl: 'https://portal.test',
+            redirectUri: 'https://client.test/callback',
+            applicationId: '100',
+            publishableKey: 'pk_live_public',
+            secretKey: 'pk_live_public',
+        );
+
+        foreach ([
+            fn () => $publicAsSecret->getLoginUrl(),
+            fn () => $publicAsSecret->handleCallback('code', str_repeat('a', 32)),
+            fn () => $publicAsSecret->user(),
+        ] as $operation) {
+            try {
+                $operation();
+                $this->fail('A publishable key was accepted as a secret key.');
+            } catch (RuntimeException $exception) {
+                $this->assertSame('A Koamishin publishable key cannot be used as a secret key.', $exception->getMessage());
+            }
+        }
+
+        Http::assertNothingSent();
+    }
 }

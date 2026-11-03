@@ -7,9 +7,11 @@ The features in this README describe the source in this checkout. A package vers
 ## Before you begin
 
 1. Deploy a Portal version that includes the SDK's application-scoped API. Create an organization, an application, and the desired `development` or `production` environment.
-2. Create an authorization-code OAuth client for that application environment. Register the **exact** callback URL of your Laravel app. Enroll the user in both the organization and that application environment, or explicitly enable the Portal environment's self-service enrollment policy.
-3. Create a separate management client if your server needs to read users or manage metadata. Authorization-code credentials and management credentials are not interchangeable.
-4. Use HTTPS for the Portal and the client application in production. Configure Laravel's application key, a session store, and secure session cookies. Never expose either client secret in frontend JavaScript, a mobile app, a repository, or a URL.
+2. Copy the environment's **Publishable Key** (`pk_test_...` / `pk_live_...`) and **Secret Key** (`sk_test_...` / `sk_live_...`)—or create a legacy authorization-code OAuth client (`client_id` / `client_secret`)—for that application environment. Register the **exact** callback URL of your Laravel app. Enroll the user in both the organization and that application environment, or explicitly enable the Portal environment's self-service enrollment policy.
+3. For server-side Management API calls (reading users, organizations, sessions, or managing metadata and memberships), authenticate either directly with the environment's `KOAMISHIN_SECRET_KEY` (`sk_test_...` / `sk_live_...`) or with a dedicated, least-privilege `ManagementApiClient` (`KOAMISHIN_MANAGEMENT_CLIENT_ID` / `KOAMISHIN_MANAGEMENT_CLIENT_SECRET`). Legacy authorization-code `KOAMISHIN_CLIENT_ID` / `KOAMISHIN_CLIENT_SECRET` credentials cannot be used for the Management API.
+4. Use HTTPS for the Portal and the client application in production. Configure Laravel's application key, a session store, and secure session cookies. Never expose a secret key (`sk_test_...` / `sk_live_...`) or client secret in frontend JavaScript, a mobile app, a repository, or a URL.
+
+An environment secret key grants **full management access** to that environment, including writes and session revocation. Prefer a dedicated, scoped management client whenever a service needs only limited privileges. Partially configured management-client credentials are rejected rather than falling back to the environment secret.
 
 The Portal and application need a working network connection. Each authenticated request revalidates the current access token with the Portal; an unavailable Portal results in an error rather than trusting old session claims.
 
@@ -31,7 +33,19 @@ composer require koamishin/auth-php:dev-main
 
 Commit the consuming project's lockfile to pin the resolved revision, and use a reviewed release for production.
 
-Add the application environment's **authorization-code** credentials to the Laravel app's `.env`:
+Add the application environment's **Publishable Key** and **Secret Key** to the Laravel app's `.env`:
+
+```dotenv
+KOAMISHIN_PORTAL_URL=https://auth.example.com
+KOAMISHIN_PUBLISHABLE_KEY=pk_live_your_publishable_key
+KOAMISHIN_SECRET_KEY=sk_live_your_secret_key
+KOAMISHIN_REDIRECT_URI=https://app.example.com/koamishin/callback
+KOAMISHIN_APPLICATION_ID=123
+```
+
+When using `KOAMISHIN_PUBLISHABLE_KEY` (`pk_test_...` / `pk_live_...`) and `KOAMISHIN_SECRET_KEY` (`sk_test_...` / `sk_live_...`), the SDK infers `development` from `*_test_*` keys and `production` from `*_live_*` keys automatically when `KOAMISHIN_ENVIRONMENT` is omitted. If you also set `KOAMISHIN_ENVIRONMENT`, it must match the environment implied by the keys, and the publishable and secret keys must belong to the same environment. The SDK rejects secret keys (`sk_...`) passed as publishable keys or client IDs, and rejects publishable keys (`pk_...`) passed as secret keys.
+
+Existing installations using legacy OAuth client credentials remain fully supported:
 
 ```dotenv
 KOAMISHIN_PORTAL_URL=https://auth.example.com
@@ -42,7 +56,7 @@ KOAMISHIN_APPLICATION_ID=123
 KOAMISHIN_ENVIRONMENT=production
 ```
 
-Set `KOAMISHIN_APPLICATION_ID` to the application's Portal ID and `KOAMISHIN_ENVIRONMENT` to `development` or `production`. They must match the OAuth client's environment. On every userinfo response the SDK checks both claims, preventing an otherwise valid token issued to another application or environment from authenticating here. Both values are required. Existing installations need these environment variables and should verify their published `config/koamishin.php` exposes `application_id` and `environment`.
+Configure either `KOAMISHIN_PUBLISHABLE_KEY` or `KOAMISHIN_CLIENT_ID` (do not set conflicting values). Set `KOAMISHIN_APPLICATION_ID` to the application's Portal ID and, when not inferred from `pk_...` / `sk_...` keys, set `KOAMISHIN_ENVIRONMENT` to `development` or `production`. On every userinfo response the SDK checks both claims, preventing an otherwise valid token issued to another application or environment from authenticating here. Existing installations should verify their published `config/koamishin.php` exposes `publishable_key`, `secret_key`, `application_id`, and `environment`.
 
 The SDK reads these values through `config/koamishin.php`; refresh Laravel's configuration cache after changing deployment configuration. The default requested scopes are `openid`, `profile`, `email`, `roles`, and `metadata:public`. Change the `scopes` array in the published configuration if your application requires a different set. The Portal only includes optional claims when the corresponding scope was granted.
 
@@ -192,7 +206,7 @@ final class KoamishinUserProjector
     public function sync(KoamishinUser $identity): User
     {
         $applicationId = (string) config('koamishin.application_id');
-        $environment = (string) config('koamishin.environment');
+        $environment = app(\Koamishin\Auth\KoamishinAuth::class)->resolvedEnvironment();
 
         if ($applicationId === '' || ! in_array($environment, ['development', 'production'], true)) {
             throw new RuntimeException('Configure the Koamishin application ID and environment.');
@@ -268,7 +282,14 @@ The role is the user's role in this application environment, not a global Portal
 
 ## Read users and manage metadata
 
-Create a **separate** client-credentials client on the Portal host. The command takes an application ID and one environment; issue only the scopes needed by the service:
+`KoamishinManagementClient` supports two server-side authentication modes:
+
+1. **Environment Secret Key (`KOAMISHIN_SECRET_KEY`)**: When `KOAMISHIN_SECRET_KEY` (`sk_test_...` or `sk_live_...`) is configured and `KOAMISHIN_MANAGEMENT_CLIENT_ID` is empty, the client authenticates directly against `/api/v1/*` with `Authorization: Bearer <secret_key>` without calling `/oauth/token`.
+2. **Least-privilege `ManagementApiClient` (`KOAMISHIN_MANAGEMENT_CLIENT_ID` / `KOAMISHIN_MANAGEMENT_CLIENT_SECRET`)**: When explicit management client credentials are configured, the client exchanges them at `/oauth/token` using `grant_type=client_credentials` and requests only the scope needed for each call. Explicit `KOAMISHIN_MANAGEMENT_CLIENT_ID` and `KOAMISHIN_MANAGEMENT_CLIENT_SECRET` take precedence when both modes are configured.
+
+Publishable keys (`pk_test_...` / `pk_live_...`) are never accepted for Management API authentication.
+
+To provision a least-privilege client-credentials client on the Portal host instead of using the full environment secret key, pass the application ID, environment, and only the scopes needed by the service:
 
 ```bash
 php artisan koamishin:management-client 123 production \

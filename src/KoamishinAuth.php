@@ -19,14 +19,40 @@ class KoamishinAuth
      */
     public function __construct(
         protected string $portalUrl,
-        protected string $clientId,
-        protected string $clientSecret,
-        protected string $redirectUri,
+        protected string $clientId = '',
+        protected string $clientSecret = '',
+        protected string $redirectUri = '',
         protected array $scopes = ['openid', 'profile', 'email', 'roles', 'metadata:public'],
         protected string $applicationId = '',
         protected string $environment = '',
+        protected string $publishableKey = '',
+        protected string $secretKey = '',
     ) {
         $this->portalUrl = rtrim($portalUrl, '/');
+    }
+
+    public function isConfigured(): bool
+    {
+        $publishableKey = trim($this->publishableKey);
+
+        return ($publishableKey !== '' ? $publishableKey : trim($this->clientId)) !== '';
+    }
+
+    public function resolvedEnvironment(): string
+    {
+        $this->validateKeyConfiguration();
+
+        $environment = trim($this->environment);
+        if ($environment !== '') {
+            return $environment;
+        }
+
+        $publishableKey = trim($this->publishableKey);
+        $effectiveClientId = $publishableKey !== '' ? $publishableKey : trim($this->clientId);
+        $secretKey = trim($this->secretKey);
+        $effectiveClientSecret = $secretKey !== '' ? $secretKey : trim($this->clientSecret);
+
+        return self::keyEnvironment($effectiveClientId) ?? self::keyEnvironment($effectiveClientSecret) ?? '';
     }
 
     public function getLoginUrl(?string $returnTo = null): string
@@ -58,7 +84,7 @@ class KoamishinAuth
         Session::put('koamishin_oauth_transactions', $transactions);
 
         $parameters = [
-            'client_id' => $this->clientId,
+            'client_id' => $this->effectiveClientId(),
             'redirect_uri' => $this->redirectUri,
             'response_type' => 'code',
             'scope' => implode(' ', $this->scopes),
@@ -77,6 +103,8 @@ class KoamishinAuth
 
     public function handleCallback(string $code, string $state): KoamishinUser
     {
+        $this->validateKeyConfiguration();
+
         $transactions = Session::get('koamishin_oauth_transactions', []);
         $transaction = is_array($transactions) ? ($transactions[$state] ?? null) : null;
 
@@ -89,8 +117,8 @@ class KoamishinAuth
 
         $response = Http::connectTimeout(3)->timeout(10)->asForm()->post("{$this->portalUrl}/oauth/token", [
             'grant_type' => 'authorization_code',
-            'client_id' => $this->clientId,
-            'client_secret' => $this->clientSecret,
+            'client_id' => $this->effectiveClientId(),
+            'client_secret' => $this->effectiveClientSecret(),
             'redirect_uri' => $this->redirectUri,
             'code_verifier' => $transaction['verifier'],
             'code' => $code,
@@ -171,7 +199,7 @@ class KoamishinAuth
             throw new RuntimeException('Portal returned invalid userinfo.');
         }
 
-        if (! hash_equals($this->applicationId, $data['application_id']) || ! hash_equals($this->environment, $data['environment'])) {
+        if (! hash_equals($this->applicationId, $data['application_id']) || ! hash_equals($this->resolvedEnvironment(), $data['environment'])) {
             return null;
         }
 
@@ -200,6 +228,8 @@ class KoamishinAuth
 
     protected function refresh(): bool
     {
+        $this->validateKeyConfiguration();
+
         $refreshToken = $this->decryptSessionToken('koamishin_refresh_token');
         if ($refreshToken === null) {
             $this->clearSession();
@@ -209,8 +239,8 @@ class KoamishinAuth
 
         $response = Http::connectTimeout(3)->timeout(10)->asForm()->post("{$this->portalUrl}/oauth/token", [
             'grant_type' => 'refresh_token',
-            'client_id' => $this->clientId,
-            'client_secret' => $this->clientSecret,
+            'client_id' => $this->effectiveClientId(),
+            'client_secret' => $this->effectiveClientSecret(),
             'refresh_token' => $refreshToken,
         ]);
         if ($response->status() >= 400 && $response->status() < 500) {
@@ -280,9 +310,76 @@ class KoamishinAuth
         Session::forget(['koamishin_user', 'koamishin_user_id', 'koamishin_access_token', 'koamishin_refresh_token', 'koamishin_token_expires_at']);
     }
 
+    protected function effectiveClientId(): string
+    {
+        $this->validateKeyConfiguration();
+
+        $publishableKey = trim($this->publishableKey);
+
+        return $publishableKey !== '' ? $publishableKey : trim($this->clientId);
+    }
+
+    protected function effectiveClientSecret(): string
+    {
+        $this->validateKeyConfiguration();
+
+        $secretKey = trim($this->secretKey);
+
+        return $secretKey !== '' ? $secretKey : trim($this->clientSecret);
+    }
+
+    protected function validateKeyConfiguration(): void
+    {
+        $publishableKey = trim($this->publishableKey);
+        $clientId = trim($this->clientId);
+        $secretKey = trim($this->secretKey);
+        $clientSecret = trim($this->clientSecret);
+
+        if (str_starts_with($publishableKey, 'sk_') || str_starts_with($clientId, 'sk_')) {
+            throw new RuntimeException('A Koamishin secret key cannot be used as a publishable key or client ID.');
+        }
+
+        if (str_starts_with($secretKey, 'pk_') || str_starts_with($clientSecret, 'pk_')) {
+            throw new RuntimeException('A Koamishin publishable key cannot be used as a secret key.');
+        }
+
+        if ($publishableKey !== '' && $clientId !== '' && $publishableKey !== $clientId) {
+            throw new RuntimeException('Configure either KOAMISHIN_PUBLISHABLE_KEY or KOAMISHIN_CLIENT_ID, not conflicting values.');
+        }
+
+        $effectiveClientId = $publishableKey !== '' ? $publishableKey : $clientId;
+        $effectiveClientSecret = $secretKey !== '' ? $secretKey : $clientSecret;
+
+        $publishableEnvironment = self::keyEnvironment($effectiveClientId);
+        $secretEnvironment = self::keyEnvironment($effectiveClientSecret);
+
+        if ($publishableEnvironment !== null && $secretEnvironment !== null && $publishableEnvironment !== $secretEnvironment) {
+            throw new RuntimeException('Koamishin publishable key and secret key environments do not match.');
+        }
+
+        $configuredEnvironment = trim($this->environment);
+        if ($configuredEnvironment !== '') {
+            if (($publishableEnvironment !== null && $publishableEnvironment !== $configuredEnvironment)
+                || ($secretEnvironment !== null && $secretEnvironment !== $configuredEnvironment)) {
+                throw new RuntimeException('Configured Koamishin environment does not match the key environment.');
+            }
+        }
+    }
+
+    protected static function keyEnvironment(string $key): ?string
+    {
+        if (preg_match('/\A(?:pk|sk)_(test|live)_[A-Za-z0-9_-]+\z/', trim($key), $matches) !== 1) {
+            return null;
+        }
+
+        return $matches[1] === 'test' ? 'development' : 'production';
+    }
+
     protected function validateApplicationContext(): void
     {
-        if (trim($this->applicationId) === '' || ! in_array($this->environment, ['development', 'production'], true)) {
+        $environment = $this->resolvedEnvironment();
+
+        if (trim($this->applicationId) === '' || ! in_array($environment, ['development', 'production'], true)) {
             throw new RuntimeException('Koamishin application ID and environment must be configured.');
         }
     }

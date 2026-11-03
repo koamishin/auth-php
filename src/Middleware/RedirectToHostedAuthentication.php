@@ -14,8 +14,12 @@ class RedirectToHostedAuthentication
     public function handle(Request $request, Closure $next): Response
     {
         if (! config('koamishin.hosted_auth_routes', true)
-            || ! filled(config('koamishin.client_id'))
             || ! $request->is('login', 'register')) {
+            return $next($request);
+        }
+
+        $auth = app(KoamishinAuth::class);
+        if (! $auth->isConfigured()) {
             return $next($request);
         }
 
@@ -29,7 +33,6 @@ class RedirectToHostedAuthentication
 
         $returnTo = $request->query('return_to', config('koamishin.hosted_return_to'));
         $returnTo = is_string($returnTo) ? $returnTo : null;
-        $auth = app(KoamishinAuth::class);
         $url = $request->is('register')
             ? $auth->getRegistrationUrl($returnTo)
             : $auth->getLoginUrl($returnTo);

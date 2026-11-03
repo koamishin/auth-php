@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Facade;
 use Koamishin\Auth\KoamishinAuth;
 
 /**
+ * @method static bool isConfigured()
+ * @method static string resolvedEnvironment()
  * @method static string getLoginUrl(?string $returnTo = null)
  * @method static string getRegistrationUrl(?string $returnTo = null)
  * @method static \Koamishin\Auth\KoamishinUser handleCallback(string $code, string $state)
