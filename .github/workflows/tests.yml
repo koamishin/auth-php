@@ -32,6 +32,9 @@ jobs:
 
             - name: Install dependencies
               run: composer install --prefer-dist --no-interaction --no-progress
+            - name: Load SDK integration classes
+              run: |
+                  php -r 'require "vendor/autoload.php"; foreach ([\Koamishin\Auth\KoamishinServiceProvider::class, \Koamishin\Auth\Console\SetupCommand::class, \Koamishin\Auth\KoamishinRequestGuard::class, \Koamishin\Auth\Middleware\AuthenticateKoamishin::class, \Koamishin\Auth\Middleware\EnsureSetupIntegrity::class] as $class) { if (! class_exists($class)) { fwrite(STDERR, "Unable to load $class\n"); exit(1); } }'
 
     laravel-integration:
         name: Portal integration (PHP ${{ matrix.php }})
@@ -69,3 +72,78 @@ jobs:
                   cp -a src config tests portal/packages/koamishin-auth-php/
                   cd portal
                   php artisan test --compact packages/koamishin-auth-php/tests
+
+    composer-consumer:
+        name: Laravel ${{ matrix.laravel }} consumer (PHP ${{ matrix.php }}, ${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - laravel: '10'
+                      php: '8.2'
+                      os: ubuntu-latest
+                    - laravel: '11'
+                      php: '8.2'
+                      os: ubuntu-latest
+                    - laravel: '12'
+                      php: '8.2'
+                      os: ubuntu-latest
+                    - laravel: '13'
+                      php: '8.3'
+                      os: ubuntu-latest
+                    - laravel: '13'
+                      php: '8.3'
+                      os: windows-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: shivammathur/setup-php@v2
+              with:
+                  php-version: ${{ matrix.php }}
+                  extensions: dom, curl, libxml, mbstring, zip, openssl, sqlite3, pdo_sqlite
+                  coverage: none
+            - name: Install a Laravel consumer and the SDK
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [ "$RUNNER_OS" = Windows ]; then
+                      SDK_ROOT="$(cd "$GITHUB_WORKSPACE" && pwd -W)"
+                  else
+                      SDK_ROOT="$GITHUB_WORKSPACE"
+                  fi
+                  composer create-project laravel/laravel "$RUNNER_TEMP/consumer" "^${{ matrix.laravel }}.0" --no-install --no-scripts --no-interaction
+                  cd "$RUNNER_TEMP/consumer"
+                  cp .env.example .env
+                  sed -i 's/^SESSION_DRIVER=.*/SESSION_DRIVER=file/' .env
+                  composer config audit.block-insecure false
+                  composer config repositories.koamishin path "$SDK_ROOT"
+                  composer require 'koamishin/auth-php:@dev' --no-update --no-interaction
+                  composer install --prefer-dist --no-interaction --no-progress
+                  php artisan key:generate --no-interaction
+                  printf '\n%s\n' "Route::fallback(fn () => response('not found', 404));" >> routes/web.php
+                  php artisan koamishin:setup --no-interaction
+                  cat >> routes/web.php <<'PHP'
+                  Route::get('/login', fn () => 'local login');
+                  Route::middleware('koamishin.auth')->get('/sdk-private', fn (\Illuminate\Http\Request $request) => $request->user()->getAuthIdentifier());
+                  Route::middleware('auth:web')->get('/sdk-local-private', fn () => 'local');
+                  PHP
+                  cat >> .env <<'ENV'
+                  KOAMISHIN_PORTAL_URL=https://portal.test
+                  KOAMISHIN_CLIENT_ID=client-id
+                  KOAMISHIN_APPLICATION_ID=100
+                  KOAMISHIN_ENVIRONMENT=production
+                  KOAMISHIN_REDIRECT_URI=https://client.test/koamishin/callback
+                  ENV
+                  cp "$SDK_ROOT/tests/Integration/InstalledApplicationTest.php" tests/Feature/InstalledApplicationTest.php
+                  cp "$SDK_ROOT/tests/Integration/LegacyInterceptionTest.php" tests/Feature/LegacyInterceptionTest.php
+                  php artisan route:cache --no-interaction
+                  php artisan config:cache --no-interaction
+                  KOAMISHIN_LEGACY_CONSUMER_TEST=1 php artisan test --compact tests/Feature/LegacyInterceptionTest.php
+                  php artisan config:clear --no-interaction
+                  php artisan route:clear --no-interaction
+                  rm config/koamishin-setup.php
+                  php artisan koamishin:setup --migrate-hosted-routes --no-interaction
+                  php artisan koamishin:setup --no-interaction
+                  php artisan route:cache --no-interaction
+                  php artisan config:cache --no-interaction
+                  KOAMISHIN_CONSUMER_TEST=1 php artisan test --compact tests/Feature/InstalledApplicationTest.php

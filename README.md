@@ -21,8 +21,12 @@ Install a package version that contains the features you need:
 
 ```bash
 composer require koamishin/auth-php
-php artisan vendor:publish --tag=koamishin-config
+php artisan koamishin:setup
 ```
+
+The setup command creates only `config/koamishin-setup.php`, an app-owned opt-in file without credentials. Commit it with your application. It enables the SDK's dedicated routes, `koamishin` guard and `koamishin.auth` middleware without replacing your default guard, local user model, controllers, or `/login`, `/register`, and `/logout` routes. Run it again safely: it refuses a modified setup file, an incompatible guard or middleware alias, conflicting route names or matching routes, or cached configuration/routes rather than overwriting them. Clear caches before setup and rebuild them afterwards as appropriate. Do not modify the opt-in file; remove it to opt out. To customize the integration, define your own routes and controller using the SDK methods instead of enabling setup.
+
+The command never asks for or writes credentials. Supply them through a private environment file or deployment secret store, not committed source. Publishing `koamishin-config` is optional if you need to customize SDK configuration; setup does not replace any published config.
 
 Until a tagged release containing these features is published, a normal stable install may select an older version. For development, after the updated SDK branch is available on GitHub, a consuming project can use its development branch explicitly:
 
@@ -60,49 +64,36 @@ Configure either `KOAMISHIN_PUBLISHABLE_KEY` or `KOAMISHIN_CLIENT_ID` (do not se
 
 The SDK reads these values through `config/koamishin.php`; refresh Laravel's configuration cache after changing deployment configuration. The default requested scopes are `openid`, `profile`, `email`, `roles`, and `metadata:public`. Change the `scopes` array in the published configuration if your application requires a different set. The Portal only includes optional claims when the corresponding scope was granted.
 
-Register the guard in `config/auth.php`:
+The SDK provider is automatically discovered by a standard Composer-installed Laravel application. Setup registers the guard at runtime unless the application already defines a `koamishin` guard using the same driver. It does not change the default guard. The generated routes use the `web` middleware and are compatible with route caching:
 
-```php
-'guards' => [
-    // Your other guards...
-    'koamishin' => [
-        'driver' => 'koamishin',
-    ],
-],
+| Method | URL | Route name |
+| --- | --- | --- |
+| GET | `/koamishin/login` | `koamishin.login` |
+| GET | `/koamishin/register` | `koamishin.register` |
+| GET | `/koamishin/callback` | `koamishin.callback` |
+| POST | `/koamishin/logout` | `koamishin.logout` |
+
+Set `KOAMISHIN_REDIRECT_URI` to the exact public URL of `/koamishin/callback`, including scheme, host and any deployment prefix, and register that exact URL with the Portal. Configure `APP_KEY` and a working session store. Set `KOAMISHIN_HOSTED_RETURN_TO=/dashboard` or pass a local `return_to` query parameter to the dedicated login or registration route. External return URLs are rejected. Without a return destination the callback goes to `/`.
+
+For backward compatibility, the SDK's legacy behavior remains enabled unless explicitly migrated: when an authorization client ID or publishable key is configured, it intercepts the app's `/login` and `/register` and rejects local POSTs to them. Set `KOAMISHIN_HOSTED_AUTH_ROUTES=false` to disable that behavior in a particular deployment.
+
+Setup enables the dedicated endpoints without implicitly disabling legacy interception. The generated marker records `migrate_hosted_routes => false`; even if credentials are absent during setup but supplied in production later, legacy interception remains in effect there. To stop interception across deployments, review existing links and local authentication behavior first, then explicitly authorize the migration:
+
+```bash
+php artisan koamishin:setup --migrate-hosted-routes
 ```
 
-The SDK registers its provider automatically in a standard Laravel installation. When an authorization client is configured, it redirects the application's `/login` and `/register` web routes to the Portal, including when the application already defines those routes. Local POST requests to those two routes are rejected. It does not create a callback route, views, or local user records for you.
+The flag records `migrate_hosted_routes => true` in the generated marker and is not needed on later reruns. Setup never overwrites an existing marker: to migrate an existing installation, first review and remove `config/koamishin-setup.php`, then rerun setup with the flag. Coordinate this change with deployment and rebuild configuration and route caches. Without the flag, setup preserves legacy interception, including for deployments where credentials are added later. Older one-field setup markers also preserve legacy interception until explicitly migrated.
 
-Set `KOAMISHIN_HOSTED_RETURN_TO=/dashboard` to choose a local path after sign-in, or pass a local `return_to` query parameter on the application's login or registration URL. External return URLs are rejected. To keep existing application routes instead, set `KOAMISHIN_HOSTED_AUTH_ROUTES=false` and define the redirects yourself. Refresh the configuration and route caches after changing these settings.
+While setup is enabled, an incompatible `koamishin` guard or `koamishin.auth` middleware alias is rejected rather than falling back to another authentication mechanism. Applications with custom HTTP kernels must support Laravel's `prependMiddleware` method for this integrity check.
 
 ## Sign in and protect routes
 
-Add the callback and protected routes to your application's `routes/web.php`. These routes require Laravel's `web` middleware because the OAuth transaction and resulting tokens live in the session. The SDK supplies the standard `login` and `register` entry points.
+Link to the dedicated login and registration routes, and protect browser routes with the dedicated middleware:
 
 ```php
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use Koamishin\Auth\Facades\Koamishin;
-
-Route::get('/koamishin/callback', function (Request $request) {
-    if ($request->query('error')) {
-        abort(403, 'Sign-in was not completed.');
-    }
-
-    $input = $request->validate([
-        'code' => ['required', 'string'],
-        'state' => ['required', 'string'],
-    ]);
-
-    try {
-        Koamishin::handleCallback($input['code'], $input['state']);
-    } catch (InvalidArgumentException $exception) {
-        abort(403, 'Invalid or expired sign-in request.');
-    }
-
-    return redirect()->to(Koamishin::consumeReturnTo('/dashboard'));
-})->name('koamishin.callback');
-
 Route::get('/dashboard', function (Request $request) {
     $user = $request->user(); // KoamishinUser
 
@@ -112,16 +103,22 @@ Route::get('/dashboard', function (Request $request) {
         'email' => $user->email,
         'public_metadata' => $user->publicMetadata,
     ]);
-})->middleware('auth:koamishin');
-
-Route::post('/logout', function () {
-    Koamishin::logout();
-
-    return redirect('/');
-})->name('logout');
+})->middleware('koamishin.auth');
 ```
 
-Submit the logout route from a POST form with Laravel's `@csrf` directive. Logout clears the local application's Koamishin session and rotates its session ID. It does **not** revoke the Portal token or end the user's Portal browser session.
+Submit `route('koamishin.logout')` from a POST form with Laravel's `@csrf` directive. Logout clears the local application's Koamishin session and rotates its session ID. It does **not** revoke the Portal token or end the user's Portal browser session or other local guards.
+
+`koamishin.auth` uses the `koamishin` guard, redirects unauthenticated browser requests to `koamishin.login`, and returns a 401 JSON response for JSON requests. It does not change the app's `auth` middleware or its other guards. The callback uses the local `return_to` supplied at login, or `KOAMISHIN_HOSTED_RETURN_TO` when configured; otherwise it redirects to `/`.
+
+You may instead use Laravel's `auth:koamishin` middleware. Its guest redirect remains controlled by the host application and normally uses the named `login` route. If your application has no such route, configure its guest redirect to `route('koamishin.login')` using the mechanism for your Laravel version, or add this route to `routes/web.php`:
+
+```php
+use Koamishin\Auth\Http\Controllers\AuthenticationController;
+
+Route::get('/login', [AuthenticationController::class, 'login'])->name('login');
+```
+
+Do not add it if it conflicts with your existing routes. Existing applications can retain their own login route. JSON requests receive Laravel's normal 401 response.
 
 `getLoginUrl()` stores a random state and PKCE verifier in the session. `getRegistrationUrl()` creates the same OAuth transaction and adds `screen_hint=signup`, allowing the Portal to show the requesting application's registration page and retain its callback. Use this method for an app's Register link: a redirect straight to the generic Portal `/register` page does not start an OAuth transaction and cannot authenticate the user back to that app.
 
@@ -256,7 +253,7 @@ final class KoamishinUserProjector
 }
 ```
 
-Call the projector with the result of the verified callback to create the local row immediately. The example copies the central email verification state to Laravel's `email_verified_at` field, preserves the original verification timestamp, and clears it if the Portal says the email is unverified. Sync again on protected requests or handle signed user update webhooks when the app needs changes reflected during an existing session:
+The setup command's packaged callback does not create or update local models. To run a projector during the callback, use an application-owned callback route and controller instead of the generated setup routes; remove the setup opt-in file, configure the guard and routes yourself, and rebuild the route and configuration caches. In that controller, call the projector with the result of the verified callback to create the local row immediately. The example copies the central email verification state to Laravel's `email_verified_at` field, preserves the original verification timestamp, and clears it if the Portal says the email is unverified. Sync again on protected requests or handle signed user update webhooks when the app needs changes reflected during an existing session:
 
 ```php
 use Koamishin\Auth\Facades\Koamishin;

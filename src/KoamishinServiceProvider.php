@@ -4,17 +4,49 @@ declare(strict_types=1);
 
 namespace Koamishin\Auth;
 
+use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
+use Koamishin\Auth\Console\SetupCommand;
+use Koamishin\Auth\Http\Controllers\AuthenticationController;
+use Koamishin\Auth\Middleware\AuthenticateKoamishin;
+use Koamishin\Auth\Middleware\EnsureSetupIntegrity;
 use Koamishin\Auth\Middleware\RedirectToHostedAuthentication;
+use RuntimeException;
 
 class KoamishinServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/koamishin.php', 'koamishin');
+
+        if ($this->app['config']->get('koamishin-setup.enabled') === true) {
+            $guard = $this->app['config']->get('auth.guards.koamishin');
+            if ($guard === null) {
+                $this->app['config']->set('auth.guards.koamishin', ['driver' => 'koamishin']);
+            } elseif (! is_array($guard) || ($guard['driver'] ?? null) !== 'koamishin') {
+                throw new RuntimeException('The koamishin guard must use the koamishin driver while setup is enabled.');
+            }
+
+            $installIntegrityMiddleware = function ($kernel): void {
+                if (! method_exists($kernel, 'prependMiddleware')) {
+                    throw new RuntimeException('The HTTP kernel cannot enforce Koamishin setup integrity.');
+                }
+
+                $kernel->prependMiddleware(EnsureSetupIntegrity::class);
+            };
+            if ($this->app->resolved(Kernel::class)) {
+                $installIntegrityMiddleware($this->app->make(Kernel::class));
+            } else {
+                $this->app->afterResolving(Kernel::class, $installIntegrityMiddleware);
+            }
+        }
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([SetupCommand::class]);
+        }
 
         $this->app->singleton(KoamishinAuth::class, function ($app) {
             $config = $app['config']->get('koamishin');
@@ -46,24 +78,55 @@ class KoamishinServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->app['router']->pushMiddlewareToGroup('web', RedirectToHostedAuthentication::class);
-
-        if (! $this->app->routesAreCached()) {
-            Route::middleware('web')->group(function (): void {
-                Route::get('/login', [RedirectToHostedAuthentication::class, 'fallback'])->name('login');
-                Route::get('/register', [RedirectToHostedAuthentication::class, 'fallback'])->name('register');
-            });
-        }
-
-        Auth::viaRequest('koamishin', function (Request $request): ?KoamishinUser {
-            $auth = $this->app->make(KoamishinAuth::class);
-            if ($request->headers->has('Authorization')) {
-                $token = $request->bearerToken();
-
-                return is_string($token) ? $auth->userForToken($token) : null;
+        if ($this->app['config']->get('koamishin-setup.enabled') === true) {
+            $alias = $this->app['router']->getMiddleware()['koamishin.auth'] ?? null;
+            if ($alias !== null && $alias !== AuthenticateKoamishin::class) {
+                throw new RuntimeException('The koamishin.auth middleware alias is already in use.');
+            }
+            if ($alias === null) {
+                $this->app['router']->aliasMiddleware('koamishin.auth', AuthenticateKoamishin::class);
             }
 
-            return $request->hasSession() ? $auth->user() : null;
+            if (! $this->app->routesAreCached()) {
+                Route::middleware('web')->prefix('koamishin')->name('koamishin.')->group(function (): void {
+                    Route::get('/login', [AuthenticationController::class, 'login'])->name('login');
+                    Route::get('/register', [AuthenticationController::class, 'register'])->name('register');
+                    Route::get('/callback', [AuthenticationController::class, 'callback'])->name('callback');
+                    Route::post('/logout', [AuthenticationController::class, 'logout'])->name('logout');
+                });
+            }
+        }
+
+        if ($this->app['config']->get('koamishin-setup.enabled') !== true
+            || $this->app['config']->get('koamishin-setup.migrate_hosted_routes') !== true) {
+            $this->app['router']->pushMiddlewareToGroup('web', RedirectToHostedAuthentication::class);
+            $this->app->afterResolving(Kernel::class, function (): void {
+                $this->app['router']->pushMiddlewareToGroup('web', RedirectToHostedAuthentication::class);
+            });
+
+            if (! $this->app->routesAreCached()) {
+                Route::middleware('web')->group(function (): void {
+                    Route::get('/login', [RedirectToHostedAuthentication::class, 'fallback'])->name('login');
+                    Route::get('/register', [RedirectToHostedAuthentication::class, 'fallback'])->name('register');
+                });
+            }
+        }
+
+        Auth::extend('koamishin', function ($app): KoamishinRequestGuard {
+            $guard = new KoamishinRequestGuard(function (Request $request) use ($app): ?KoamishinUser {
+                $auth = $app->make(KoamishinAuth::class);
+                if ($request->headers->has('Authorization')) {
+                    $token = $request->bearerToken();
+
+                    return is_string($token) ? $auth->userForToken($token) : null;
+                }
+
+                return $request->hasSession() ? $auth->user() : null;
+            }, $app['request'], $app['auth']->createUserProvider());
+
+            $app->refresh('request', $guard, 'setRequest');
+
+            return $guard;
         });
 
         if ($this->app->runningInConsole()) {
