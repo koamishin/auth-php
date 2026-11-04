@@ -143,6 +143,8 @@ jobs:
                   php artisan route:clear --no-interaction
                   rm config/koamishin-setup.php
                   cp "$SDK_ROOT/tests/Fixtures/laravel-react-starter-auth.php" routes/auth.php
+                  mkdir -p app/Http/Controllers/Auth
+                  cp "$SDK_ROOT/tests/Fixtures/laravel-react-starter-auth-controllers/"*.php app/Http/Controllers/Auth/
                   printf '\n%s\n' "require __DIR__.'/auth.php';" >> routes/web.php
                   php artisan koamishin:setup --migrate-hosted-routes --replace-starter-auth-routes --no-interaction
                   php artisan koamishin:setup --no-interaction
