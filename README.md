@@ -24,11 +24,21 @@ composer require koamishin/auth-php
 php artisan koamishin:setup
 ```
 
-The setup command creates only `config/koamishin-setup.php`, an app-owned opt-in file without credentials. Commit it with your application. It enables the SDK's dedicated routes, `koamishin` guard and `koamishin.auth` middleware without replacing your default guard, local user model, controllers, or `/login`, `/register`, and `/logout` routes. Run it again safely: it refuses a modified setup file, an incompatible guard or middleware alias, conflicting route names or matching routes, or cached configuration/routes rather than overwriting them. Clear caches before setup and rebuild them afterwards as appropriate. Do not modify the opt-in file; remove it to opt out. To customize the integration, define your own routes and controller using the SDK methods instead of enabling setup.
+By default, setup creates only `config/koamishin-setup.php`, an app-owned opt-in file without credentials. Commit it with your application. It enables the SDK's dedicated routes, `koamishin` guard and `koamishin.auth` middleware without replacing your default guard, local user model, controllers, or `/login`, `/register`, and `/logout` routes.
+
+When run interactively, setup recognizes the unmodified Laravel React Starter Kit `routes/auth.php` file and asks whether to replace its local login, registration, password-reset, verification, confirmation, and logout routes with Koamishin routes. The replacement uses the SDK's `AuthenticationController`; it does not delete the old application controllers. Choose **no** to keep the starter routes. For scripts, pass `--replace-starter-auth-routes` to explicitly authorize the same replacement:
+
+```bash
+php artisan koamishin:setup --replace-starter-auth-routes
+```
+
+The route replacement is deliberately limited to the exact supported starter file, and only when `routes/web.php` includes it. Modified, custom, or unrecognized route files are never overwritten; setup reports that they need manual integration instead. Non-interactive setup leaves local routes unchanged unless `--replace-starter-auth-routes` is supplied. The option only replaces `routes/auth.php`: it does not change protected application routes, `config/auth.php`, settings/profile pages, controllers, models, frontend code, or application tests. Review those app-specific pieces and use `koamishin.auth` for protected browser routes. The manual steps for other starters and customized applications are below.
+
+Run setup again safely: it refuses a modified setup file, an incompatible guard or middleware alias, conflicting route names or matching routes, or cached configuration/routes rather than overwriting them. Clear caches before setup and rebuild them afterwards as appropriate. Do not modify the opt-in file; remove it to opt out.
 
 The command never asks for or writes credentials. Supply them through a private environment file or deployment secret store, not committed source. Publishing `koamishin-config` is optional if you need to customize SDK configuration; setup does not replace any published config.
 
-Until a tagged release containing these features is published, a normal stable install may select an older version. For development, after the updated SDK branch is available on GitHub, a consuming project can use its development branch explicitly:
+Packagist may not refresh immediately after a Git tag is pushed. If the latest release is not listed there, a normal stable install may still select an older version; configure the Packagist GitHub hook or refresh the package metadata. For development, after the updated SDK branch is available on GitHub, a consuming project can use its development branch explicitly:
 
 ```bash
 composer config repositories.koamishin-auth vcs https://github.com/koamishin/auth-php.git
@@ -105,6 +115,25 @@ Route::get('/dashboard', function (Request $request) {
     ]);
 })->middleware('koamishin.auth');
 ```
+
+### Manual route setup for other starter kits
+
+If setup does not recognize your `routes/auth.php`, it leaves the file unchanged. Disable or replace local credential and account routes deliberately; do not leave local password endpoints active and assume the SDK has replaced them. A minimal web route file can delegate its familiar route names to the SDK controller:
+
+```php
+use Illuminate\Support\Facades\Route;
+use Koamishin\Auth\Http\Controllers\AuthenticationController;
+
+Route::get('login', [AuthenticationController::class, 'login'])->name('login');
+Route::get('register', [AuthenticationController::class, 'register'])->name('register');
+Route::redirect('forgot-password', '/koamishin/login')
+    ->name('password.request');
+Route::redirect('reset-password/{token}', '/koamishin/login')
+    ->name('password.reset');
+Route::post('logout', [AuthenticationController::class, 'logout'])->name('logout');
+```
+
+Remove local `POST /login` and `POST /register`, password-reset submissions, local email verification, and password-confirmation endpoints unless your application deliberately keeps those separate. Protect application routes with `koamishin.auth`; the package setup does not rewrite middleware in `routes/web.php` or `routes/settings.php`. Profile updates, account deletion, local Eloquent projections, and frontend forms are application-specific and must be adapted separately. `KoamishinUser` is the authenticated Portal identity, not an Eloquent model.
 
 Submit `route('koamishin.logout')` from a POST form with Laravel's `@csrf` directive. Logout clears the local application's Koamishin session and rotates its session ID. It does **not** revoke the Portal token or end the user's Portal browser session or other local guards.
 

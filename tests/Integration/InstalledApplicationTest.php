@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
+use Koamishin\Auth\Http\Controllers\AuthenticationController;
 use Koamishin\Auth\Middleware\AuthenticateKoamishin;
 use Tests\TestCase;
 
@@ -22,7 +23,9 @@ class InstalledApplicationTest extends TestCase
     {
         $this->assertTrue($this->app->configurationIsCached());
         $this->assertTrue($this->app->routesAreCached());
-        $this->assertFalse($this->app['router']->has('login'));
+        $loginRoute = $this->app['router']->getRoutes()->getByName('login');
+        $this->assertNotNull($loginRoute);
+        $this->assertSame(AuthenticationController::class.'@login', $loginRoute->getActionName());
         $this->get('/sdk-private')->assertRedirect('/koamishin/login');
         $this->getJson('/sdk-private')->assertUnauthorized();
         $this->getJson('/sdk-local-private')->assertUnauthorized();

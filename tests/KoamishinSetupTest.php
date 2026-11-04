@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
+use Koamishin\Auth\Console\LaravelReactStarterAuthRoutes;
 use Koamishin\Auth\Console\SetupCommand;
 use Koamishin\Auth\Http\Controllers\AuthenticationController;
 use Koamishin\Auth\KoamishinAuth;
@@ -54,6 +55,125 @@ class KoamishinSetupTest extends TestCase
         }
 
         parent::tearDown();
+    }
+
+    private function installStarterAuthRoutes(?string $contents = null): string
+    {
+        $this->app->setBasePath($this->sandbox);
+        mkdir(base_path('routes'), 0777, true);
+        $contents ??= (string) file_get_contents(__DIR__.'/Fixtures/laravel-react-starter-auth.php');
+        file_put_contents(base_path('routes/auth.php'), $contents);
+        file_put_contents(base_path('routes/web.php'), "<?php\n\nrequire __DIR__.'/auth.php';\n");
+
+        return base_path('routes/auth.php');
+    }
+
+    public function test_interactive_setup_prompts_before_replacing_supported_starter_auth_routes(): void
+    {
+        $path = $this->installStarterAuthRoutes();
+        $originalContents = file_get_contents($path);
+
+        $this->artisan('koamishin:setup')
+            ->expectsConfirmation('Replace the unmodified Laravel React Starter Kit authentication routes with Koamishin routes?', 'yes')
+            ->assertExitCode(0);
+
+        $replacement = (string) file_get_contents($path);
+        $this->assertNotSame($originalContents, $replacement);
+        $this->assertTrue(LaravelReactStarterAuthRoutes::isReplacement($replacement));
+        $this->assertStringContainsString(AuthenticationController::class, $replacement);
+        $this->assertStringNotContainsString('RegisteredUserController', $replacement);
+    }
+
+    public function test_declining_the_starter_route_prompt_preserves_the_local_routes(): void
+    {
+        $path = $this->installStarterAuthRoutes();
+        $originalContents = file_get_contents($path);
+
+        $this->artisan('koamishin:setup')
+            ->expectsConfirmation('Replace the unmodified Laravel React Starter Kit authentication routes with Koamishin routes?', 'no')
+            ->assertExitCode(0);
+
+        $this->assertSame($originalContents, file_get_contents($path));
+    }
+
+    public function test_non_interactive_setup_does_not_replace_starter_routes_without_the_explicit_option(): void
+    {
+        $path = $this->installStarterAuthRoutes();
+        $originalContents = file_get_contents($path);
+
+        $this->assertSame(0, Artisan::call('koamishin:setup', ['--no-interaction' => true]));
+        $this->assertSame($originalContents, file_get_contents($path));
+    }
+
+    public function test_explicit_route_replacement_is_idempotent(): void
+    {
+        $path = $this->installStarterAuthRoutes();
+
+        $this->assertSame(0, Artisan::call('koamishin:setup', ['--replace-starter-auth-routes' => true, '--no-interaction' => true]));
+        $replacement = file_get_contents($path);
+        $this->assertTrue(LaravelReactStarterAuthRoutes::isReplacement((string) $replacement));
+
+        $this->assertSame(0, Artisan::call('koamishin:setup', ['--replace-starter-auth-routes' => true, '--no-interaction' => true]));
+        $this->assertSame($replacement, file_get_contents($path));
+    }
+
+    public function test_replaced_starter_routes_dispatch_to_the_sdk_controller(): void
+    {
+        $path = $this->installStarterAuthRoutes();
+
+        $this->assertSame(0, Artisan::call('koamishin:setup', [
+            '--migrate-hosted-routes' => true,
+            '--replace-starter-auth-routes' => true,
+            '--no-interaction' => true,
+        ]));
+
+        config(['koamishin-setup' => require config_path('koamishin-setup.php')]);
+        $this->app->register(KoamishinServiceProvider::class, true);
+        Route::middleware('web')->group(function () use ($path): void {
+            require $path;
+        });
+        Route::getRoutes()->refreshNameLookups();
+
+        foreach (['login', 'register', 'logout'] as $action) {
+            $route = Route::getRoutes()->getByName($action);
+            $this->assertNotNull($route);
+            $this->assertSame(AuthenticationController::class.'@'.$action, $route->getActionName());
+        }
+
+        $this->assertNull(Route::getRoutes()->getByName('password.email'));
+        $this->assertNull(Route::getRoutes()->getByName('password.store'));
+        $this->assertNull(Route::getRoutes()->getByName('verification.notice'));
+        $this->assertNull(Route::getRoutes()->getByName('password.confirm'));
+    }
+
+    public function test_route_replacement_preserves_crlf_line_endings(): void
+    {
+        $stockContents = (string) file_get_contents(__DIR__.'/Fixtures/laravel-react-starter-auth.php');
+        $normalizedStockContents = str_replace(["\r\n", "\r"], "\n", $stockContents);
+        $path = $this->installStarterAuthRoutes(str_replace("\n", "\r\n", $normalizedStockContents));
+
+        $this->assertSame(0, Artisan::call('koamishin:setup', ['--replace-starter-auth-routes' => true, '--no-interaction' => true]));
+
+        $replacement = (string) file_get_contents($path);
+        $this->assertTrue(LaravelReactStarterAuthRoutes::isReplacement($replacement));
+        $this->assertDoesNotMatchRegularExpression('/(?<!\r)\n/', $replacement);
+    }
+
+    public function test_explicit_route_replacement_refuses_custom_or_unloaded_routes_without_changing_files(): void
+    {
+        $customContents = (string) file_get_contents(__DIR__.'/Fixtures/laravel-react-starter-auth.php')."\n// application customization\n";
+        $path = $this->installStarterAuthRoutes($customContents);
+
+        $this->assertNotSame(0, Artisan::call('koamishin:setup', ['--replace-starter-auth-routes' => true, '--no-interaction' => true]));
+        $this->assertSame($customContents, file_get_contents($path));
+        $this->assertFileDoesNotExist(config_path('koamishin-setup.php'));
+
+        file_put_contents($path, file_get_contents(__DIR__.'/Fixtures/laravel-react-starter-auth.php'));
+        file_put_contents(base_path('routes/web.php'), "<?php\n\n// Auth routes are not loaded here.\n");
+
+        $this->assertNotSame(0, Artisan::call('koamishin:setup', ['--replace-starter-auth-routes' => true, '--no-interaction' => true]));
+        $this->assertTrue(LaravelReactStarterAuthRoutes::isStock((string) file_get_contents($path)));
+        $this->assertFileDoesNotExist(config_path('koamishin-setup.php'));
     }
 
     public function test_setup_creates_a_repeatable_marker_without_changing_existing_config(): void

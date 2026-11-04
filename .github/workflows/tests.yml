@@ -142,8 +142,12 @@ jobs:
                   php artisan config:clear --no-interaction
                   php artisan route:clear --no-interaction
                   rm config/koamishin-setup.php
-                  php artisan koamishin:setup --migrate-hosted-routes --no-interaction
+                  cp "$SDK_ROOT/tests/Fixtures/laravel-react-starter-auth.php" routes/auth.php
+                  printf '\n%s\n' "require __DIR__.'/auth.php';" >> routes/web.php
+                  php artisan koamishin:setup --migrate-hosted-routes --replace-starter-auth-routes --no-interaction
                   php artisan koamishin:setup --no-interaction
+                  cp "$SDK_ROOT/tests/Integration/StarterAuthReplacementTest.php" tests/Feature/StarterAuthReplacementTest.php
                   php artisan route:cache --no-interaction
                   php artisan config:cache --no-interaction
+                  KOAMISHIN_STARTER_REPLACEMENT_TEST=1 php artisan test --compact tests/Feature/StarterAuthReplacementTest.php
                   KOAMISHIN_CONSUMER_TEST=1 php artisan test --compact tests/Feature/InstalledApplicationTest.php

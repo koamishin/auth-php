@@ -12,9 +12,9 @@ use Koamishin\Auth\Middleware\AuthenticateKoamishin;
 
 class SetupCommand extends Command
 {
-    protected $signature = 'koamishin:setup {--migrate-hosted-routes : Disable active legacy login and registration interception}';
+    protected $signature = 'koamishin:setup {--migrate-hosted-routes : Disable active legacy login and registration interception} {--replace-starter-auth-routes : Replace the unmodified Laravel React Starter Kit authentication routes}';
 
-    protected $description = 'Enable the dedicated Koamishin authentication routes and guard';
+    protected $description = 'Enable Koamishin auth and optionally replace supported starter-kit routes';
 
     private const LEGACY_CONFIG = <<<'PHP'
 <?php
@@ -29,6 +29,89 @@ PHP;
         $value = $migrateHostedRoutes ? 'true' : 'false';
 
         return "<?php\n\nreturn [\n    'enabled' => true,\n    'migrate_hosted_routes' => {$value},\n];\n";
+    }
+
+    private function authRoutesAreLoadedByWeb(): bool
+    {
+        $path = base_path('routes/web.php');
+        if (is_link($path) || ! is_file($path)) {
+            return false;
+        }
+
+        $contents = @file_get_contents($path);
+
+        return is_string($contents)
+            && preg_match_all(
+                '~^[\t ]*require[\t ]+__DIR__[\t ]*\.[\t ]*[\'"]/?auth\.php[\'"][\t ]*;[\t ]*$~m',
+                str_replace(["\r\n", "\r"], "\n", $contents),
+            ) === 1;
+    }
+
+    private function confirmStarterAuthRouteReplacement(): bool
+    {
+        $question = 'Replace the unmodified Laravel React Starter Kit authentication routes with Koamishin routes?';
+        if (function_exists('Laravel\\Prompts\\confirm')) {
+            return \Laravel\Prompts\confirm($question, false);
+        }
+
+        return $this->confirm($question, false);
+    }
+
+    private function replaceAuthRoutes(string $path, string $originalContents, string $replacementContents): bool
+    {
+        if (is_link($path) || ! is_file($path) || @file_get_contents($path) !== $originalContents) {
+            return false;
+        }
+
+        $temporaryPath = @tempnam(dirname($path), '.koamishin-auth-');
+        if (! is_string($temporaryPath)) {
+            return false;
+        }
+
+        $permissions = @fileperms($path);
+        $written = @file_put_contents($temporaryPath, $replacementContents, LOCK_EX);
+        if ($written !== strlen($replacementContents)) {
+            @unlink($temporaryPath);
+
+            return false;
+        }
+        if (is_int($permissions)) {
+            @chmod($temporaryPath, $permissions & 0777);
+        }
+
+        if (@file_get_contents($path) !== $originalContents) {
+            @unlink($temporaryPath);
+
+            return false;
+        }
+
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            if (@rename($temporaryPath, $path)) {
+                return true;
+            }
+
+            @unlink($temporaryPath);
+
+            return false;
+        }
+
+        $backupPath = $temporaryPath.'.backup';
+        if (! @rename($path, $backupPath)) {
+            @unlink($temporaryPath);
+
+            return false;
+        }
+
+        if (! @rename($temporaryPath, $path)) {
+            @rename($backupPath, $path);
+            @unlink($temporaryPath);
+
+            return false;
+        }
+
+        @unlink($backupPath);
+
+        return true;
     }
 
     public function handle(): int
@@ -101,6 +184,37 @@ PHP;
             }
         }
 
+        $authRoutesPath = base_path('routes/auth.php');
+        $authRoutesContents = is_file($authRoutesPath) && ! is_link($authRoutesPath)
+            ? @file_get_contents($authRoutesPath)
+            : false;
+        $authRoutesAreLoaded = $this->authRoutesAreLoadedByWeb();
+        $authRoutesAreStarterKit = is_string($authRoutesContents)
+            && $authRoutesAreLoaded
+            && LaravelReactStarterAuthRoutes::isStock($authRoutesContents);
+        $authRoutesAreAlreadyReplaced = is_string($authRoutesContents)
+            && $authRoutesAreLoaded
+            && LaravelReactStarterAuthRoutes::isReplacement($authRoutesContents);
+        $replaceLocalAuth = false;
+
+        if ($this->option('replace-starter-auth-routes')) {
+            if (! $authRoutesAreStarterKit && ! $authRoutesAreAlreadyReplaced) {
+                $this->error('Local auth routes were not replaced. This option only supports the unmodified Laravel React Starter Kit routes included by routes/web.php.');
+
+                return self::FAILURE;
+            }
+
+            $replaceLocalAuth = $authRoutesAreStarterKit;
+        } elseif ($authRoutesAreStarterKit && $this->input->isInteractive()) {
+            $replaceLocalAuth = $this->confirmStarterAuthRouteReplacement();
+        }
+
+        if ($replaceLocalAuth && (! is_writable($authRoutesPath) || ! is_writable(dirname($authRoutesPath)))) {
+            $this->error('routes/auth.php is not writable. No application routes were changed.');
+
+            return self::FAILURE;
+        }
+
         if (! $markerExists) {
             $file = @fopen($path, 'x');
             if ($file === false) {
@@ -123,9 +237,29 @@ PHP;
             return self::FAILURE;
         }
 
-        $this->info('Koamishin setup enabled. Existing application files were not replaced.');
+        if ($replaceLocalAuth && is_string($authRoutesContents)) {
+            $replacementContents = LaravelReactStarterAuthRoutes::replacement($authRoutesContents);
+            if (! $this->replaceAuthRoutes($authRoutesPath, $authRoutesContents, $replacementContents)) {
+                $this->error('Koamishin runtime setup is enabled, but routes/auth.php was not replaced. Resolve the file change or permission issue and rerun with --replace-starter-auth-routes.');
+
+                return self::FAILURE;
+            }
+            $authRoutesAreAlreadyReplaced = true;
+        }
+
+        $this->info('Koamishin setup enabled.');
         $this->line('The guard and routes are available on the next application boot.');
         $this->line('Protect browser routes with the koamishin.auth middleware.');
+        if ($authRoutesAreAlreadyReplaced) {
+            $this->info('The Laravel React Starter Kit authentication routes now use Koamishin.');
+            $this->line('Only routes/auth.php was changed. Update protected route middleware and review settings/profile flows separately; see the README.');
+        } elseif ($authRoutesAreStarterKit) {
+            $this->line('Starter-kit routes were left unchanged. Choose yes at the prompt or rerun with --replace-starter-auth-routes to replace them.');
+        } elseif (! is_string($authRoutesContents)) {
+            $this->line('No supported starter-kit routes/auth.php was found. No application routes were changed.');
+        } else {
+            $this->line('Custom auth routes were not changed. See the README for manual setup instructions.');
+        }
         if ($migrateHostedRoutes) {
             $this->warn('The SDK legacy interception of /login and /register will be disabled on the next application boot.');
         } else {
@@ -136,5 +270,4 @@ PHP;
 
         return self::SUCCESS;
     }
-
 }
