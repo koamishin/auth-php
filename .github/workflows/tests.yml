@@ -100,7 +100,7 @@ jobs:
             - uses: shivammathur/setup-php@v2
               with:
                   php-version: ${{ matrix.php }}
-                  extensions: dom, curl, libxml, mbstring, zip, openssl, sqlite3, pdo_sqlite
+                  extensions: dom, curl, fileinfo, libxml, mbstring, zip, openssl, sqlite3, pdo_sqlite
                   coverage: none
             - name: Install a Laravel consumer and the SDK
               shell: bash
