@@ -8,21 +8,32 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use InvalidArgumentException;
 use Koamishin\Auth\KoamishinAuth;
+use Symfony\Component\HttpFoundation\Response;
 
 class AuthenticationController
 {
-    public function login(Request $request, KoamishinAuth $auth): RedirectResponse
+    public function login(Request $request, KoamishinAuth $auth): Response
     {
         $returnTo = $request->query('return_to', config('koamishin.hosted_return_to'));
+        $url = $auth->getLoginUrl(is_string($returnTo) ? $returnTo : null);
 
-        return redirect()->away($auth->getLoginUrl(is_string($returnTo) ? $returnTo : null));
+        if ($request->header('X-Inertia')) {
+            return response('', 409)->header('X-Inertia-Location', $url);
+        }
+
+        return redirect()->away($url);
     }
 
-    public function register(Request $request, KoamishinAuth $auth): RedirectResponse
+    public function register(Request $request, KoamishinAuth $auth): Response
     {
         $returnTo = $request->query('return_to', config('koamishin.hosted_return_to'));
+        $url = $auth->getRegistrationUrl(is_string($returnTo) ? $returnTo : null);
 
-        return redirect()->away($auth->getRegistrationUrl(is_string($returnTo) ? $returnTo : null));
+        if ($request->header('X-Inertia')) {
+            return response('', 409)->header('X-Inertia-Location', $url);
+        }
+
+        return redirect()->away($url);
     }
 
     public function callback(Request $request, KoamishinAuth $auth): RedirectResponse
