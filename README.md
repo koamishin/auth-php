@@ -1,6 +1,6 @@
 # Koamishin Auth for Laravel
 
-The Koamishin PHP SDK connects a Laravel application to a Koamishin Portal. It provides an OAuth 2.0 authorization-code login with PKCE, a Laravel request guard, a server-side management client, and webhook signature verification.
+The Koamishin PHP SDK connects a Laravel application to Koamishin Auth. It provides an OAuth 2.0 authorization-code login with PKCE, a Laravel request guard, a server-side management client, and webhook signature verification.
 
 The features in this README describe the source in this checkout. A package version already published on Packagist may not include them; check the version you install. The package declares support for PHP 8.2–8.5 and Laravel's Illuminate components 10–13; those constraints are not a guarantee that every combination has been tested.
 
