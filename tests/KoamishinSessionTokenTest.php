@@ -12,6 +12,7 @@ use Koamishin\Auth\KoamishinAuth;
 use Koamishin\Auth\KoamishinServiceProvider;
 use Koamishin\Auth\Middleware\AuthenticateWithKoamishin;
 use Koamishin\Auth\SessionTokenVerifier;
+use Symfony\Component\HttpFoundation\Response;
 use Tests\TestCase;
 
 require_once __DIR__.'/Support/bootstrap.php';
@@ -200,7 +201,7 @@ class KoamishinSessionTokenTest extends TestCase
 
         $response = app(AuthenticateWithKoamishin::class)->handle(
             $request,
-            fn (Request $request): \Symfony\Component\HttpFoundation\Response => response($request->user()->id),
+            fn (Request $request): Response => response($request->user()->id),
             'admin',
         );
 
@@ -222,7 +223,7 @@ class KoamishinSessionTokenTest extends TestCase
 
         $response = app(AuthenticateWithKoamishin::class)->handle(
             $request,
-            fn (): \Symfony\Component\HttpFoundation\Response => response('unexpected'),
+            fn (): Response => response('unexpected'),
         );
 
         $this->assertSame(401, $response->getStatusCode());

@@ -6,6 +6,7 @@ namespace Koamishin\Auth;
 
 use Firebase\JWT\JWK;
 use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Throwable;
@@ -135,7 +136,7 @@ class SessionTokenVerifier
     /**
      * The cached verification keys, keyed by kid.
      *
-     * @return array<string, \Firebase\JWT\Key>
+     * @return array<string, Key>
      */
     protected function verificationKeys(): array
     {
