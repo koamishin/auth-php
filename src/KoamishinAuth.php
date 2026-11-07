@@ -143,35 +143,91 @@ class KoamishinAuth
      */
     public function user(): ?KoamishinUser
     {
-        $accessToken = $this->decryptSessionToken('koamishin_access_token');
-        $expiresAt = Session::get('koamishin_token_expires_at');
-        $userId = Session::get('koamishin_user_id');
-        if ($accessToken === null || ! is_numeric($expiresAt) || ! is_string($userId) || $userId === '') {
-            $this->clearSession();
-
+        $accessToken = $this->currentAccessToken();
+        if ($accessToken === null) {
             return null;
         }
 
-        if ((int) $expiresAt <= time()) {
-            if (! $this->refresh()) {
-                return null;
-            }
-            $accessToken = $this->decryptSessionToken('koamishin_access_token');
-            if ($accessToken === null) {
-                $this->clearSession();
-
-                return null;
-            }
-        }
-
         $user = $this->userForToken($accessToken);
-        if ($user === null || ! hash_equals($userId, $user->id)) {
+        $userId = Session::get('koamishin_user_id');
+        if ($user === null || ! is_string($userId) || ! hash_equals($userId, $user->id)) {
             $this->clearSession();
 
             return null;
         }
 
         return $user;
+    }
+
+    /**
+     * Mint a short-lived session token for the current session.
+     *
+     * The token can be handed to this application's own backends, which verify
+     * it offline with {@see SessionTokenVerifier} instead of calling the
+     * Koamishin Auth userinfo endpoint on every request.
+     */
+    public function sessionToken(): SessionToken
+    {
+        $accessToken = $this->currentAccessToken();
+        if ($accessToken === null) {
+            throw new RuntimeException('No active Koamishin session to mint a session token for.');
+        }
+
+        $response = Http::connectTimeout(3)->timeout(10)->withToken($accessToken)
+            ->acceptJson()->post("{$this->portalUrl}/api/oauth/session-token");
+
+        if ($response->status() === 401 || $response->status() === 403) {
+            $this->clearSession();
+
+            throw new RuntimeException('Koamishin Auth rejected the access token.');
+        }
+        if (! $response->successful()) {
+            throw new RuntimeException('Unable to mint a session token.');
+        }
+
+        /** @var array<string, mixed> $payload */
+        $payload = $response->json() ?? [];
+
+        return SessionToken::fromArray($payload);
+    }
+
+    /**
+     * Authenticate a session token offline, bound to this application.
+     *
+     * Returns null when the token is invalid or belongs to another application
+     * or environment. Profile fields are empty on the returned user — session
+     * tokens carry identity, not profile; fetch userinfo when you need more.
+     */
+    public function userForSessionToken(string $token): ?KoamishinUser
+    {
+        $this->validateApplicationContext();
+
+        try {
+            $claims = (new SessionTokenVerifier($this->portalUrl))->verify($token);
+        } catch (InvalidSessionToken) {
+            return null;
+        }
+
+        $applicationId = is_string($claims['application_id'] ?? null) ? $claims['application_id'] : '';
+        $environment = is_string($claims['environment'] ?? null) ? $claims['environment'] : '';
+
+        if ($applicationId === '' || $environment === '') {
+            return null;
+        }
+
+        if (! hash_equals($this->applicationId, $applicationId) || ! hash_equals($this->resolvedEnvironment(), $environment)) {
+            return null;
+        }
+
+        $organization = is_array($claims['o'] ?? null) ? $claims['o'] : [];
+
+        return KoamishinUser::fromArray([
+            'sub' => $claims['sub'],
+            'application_id' => $applicationId,
+            'environment' => $environment,
+            'organization_id' => is_string($organization['id'] ?? null) ? $organization['id'] : null,
+            'roles' => is_string($organization['rol'] ?? null) ? [$organization['rol']] : [],
+        ]);
     }
 
     /**
@@ -252,6 +308,36 @@ class KoamishinAuth
         $this->storeTokens($this->validatedTokens($response));
 
         return true;
+    }
+
+    /**
+     * The stored access token for the current session, refreshing it first when
+     * it has expired. Clears the session and returns null when there is none.
+     */
+    protected function currentAccessToken(): ?string
+    {
+        $accessToken = $this->decryptSessionToken('koamishin_access_token');
+        $expiresAt = Session::get('koamishin_token_expires_at');
+        $userId = Session::get('koamishin_user_id');
+        if ($accessToken === null || ! is_numeric($expiresAt) || ! is_string($userId) || $userId === '') {
+            $this->clearSession();
+
+            return null;
+        }
+
+        if ((int) $expiresAt <= time()) {
+            if (! $this->refresh()) {
+                return null;
+            }
+            $accessToken = $this->decryptSessionToken('koamishin_access_token');
+            if ($accessToken === null) {
+                $this->clearSession();
+
+                return null;
+            }
+        }
+
+        return $accessToken;
     }
 
     /**

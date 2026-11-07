@@ -15,6 +15,8 @@ use Koamishin\Auth\KoamishinAuth;
  * @method static \Koamishin\Auth\KoamishinUser handleCallback(string $code, string $state)
  * @method static \Koamishin\Auth\KoamishinUser|null user()
  * @method static \Koamishin\Auth\KoamishinUser|null userForToken(string $accessToken)
+ * @method static \Koamishin\Auth\SessionToken sessionToken()
+ * @method static \Koamishin\Auth\KoamishinUser|null userForSessionToken(string $token)
  * @method static bool check()
  * @method static void logout()
  * @method static string consumeReturnTo(string $default = '/')

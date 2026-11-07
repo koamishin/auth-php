@@ -161,6 +161,49 @@ The Portal validates the client and callback and applies the selected environmen
 
 For JSON API routes, `auth:koamishin` also accepts an `Authorization: Bearer <access-token>` header and validates it against the Portal. A request carrying an invalid bearer token is not allowed to fall back to a browser session. The guard provides a `KoamishinUser` implementing Laravel's authentication contract, not an Eloquent model; map the Portal user ID to a local model yourself if your application requires one.
 
+## Use session tokens
+
+A session token is a short-lived JWT (60 seconds) describing the signed-in user and their session. Hand one to your own backends and they can authenticate requests **offline**, against the cached JWKS key set, instead of calling the Koamishin Auth userinfo endpoint on every request.
+
+Mint one for the current session. `sessionToken()` refreshes an expired access token first and throws a `RuntimeException` when there is no active session:
+
+```php
+use Koamishin\Auth\Facades\Koamishin;
+
+$token = Koamishin::sessionToken();
+
+$token->token;      // the JWT to send to your backends
+$token->expiresAt;  // Unix timestamp, 60 seconds out
+```
+
+Verify one on a backend. The key set is fetched from `GET /oauth/jwks` once and cached, so verification needs no Koamishin Auth round trip. A token that is malformed, expired, signed by someone else, or unknown to the key set throws `Koamishin\Auth\InvalidSessionToken`:
+
+```php
+use Koamishin\Auth\SessionTokenVerifier;
+
+$claims = (new SessionTokenVerifier('https://auth.yourcompany.com'))->verify($jwt);
+
+$claims['sub'];             // the user ID
+$claims['sid'];             // the session ID, revocable through the management API
+$claims['application_id'];  // the application the token was minted for
+$claims['environment'];     // 'development' or 'production'
+$claims['fva'];             // [minutes since first factor, since second factor, or -1]
+$claims['sts'];             // 'active' or 'pending'
+```
+
+Always bind the claims to your own application before trusting one — a token minted for another application must be refused:
+
+```php
+if (($claims['application_id'] ?? null) !== config('koamishin.application_id')
+    || ($claims['environment'] ?? null) !== config('koamishin.environment')) {
+    abort(401);
+}
+```
+
+`Koamishin::userForSessionToken($jwt)` performs the verification and that binding for you and returns a `KoamishinUser`, or null when the token is invalid or belongs elsewhere. The `koamishin.auth` middleware accepts a session token as a bearer token and verifies it offline — a request authenticated this way makes no userinfo call. Profile fields (name, email, metadata) are empty on a session-token user because session tokens carry identity, not profile; fetch userinfo when you need more. Bearer tokens that are not session tokens keep being revalidated against Koamishin Auth as before.
+
+Session tokens are minted only for user access tokens; client-credential management tokens cannot mint them. The `sts` claim reports verifications the session still owes (`email_verification`, `mfa`, listed in `tasks`); the middleware does not refuse `pending` sessions — that policy belongs to your application.
+
 ## Maintain a local Eloquent user projection
 
 Keep `KoamishinUser` as the authenticated Portal principal. If your application needs normal Eloquent relationships, create a local `users` row after the callback and identify it by a unique `koamishin_user_id`. This example assumes each application and environment has its own local database. The local row is a projection of selected Portal profile fields; it does not replace Portal authentication or store Portal passwords and tokens. App-owned records continue to reference the local `users.id`.
