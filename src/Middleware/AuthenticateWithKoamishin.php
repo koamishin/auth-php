@@ -35,7 +35,12 @@ class AuthenticateWithKoamishin
                 return response()->json(['message' => 'Unauthenticated.'], 401);
             }
 
-            return redirect()->away(Koamishin::getLoginUrl($request->getRequestUri()));
+            $url = Koamishin::getLoginUrl($request->getRequestUri());
+            if ($request->header('X-Inertia')) {
+                return response('', 409)->header('X-Inertia-Location', $url);
+            }
+
+            return redirect()->away($url);
         }
 
         if ($role && ! $user->hasRole($role)) {

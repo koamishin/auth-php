@@ -30,6 +30,12 @@ class KoamishinUser implements Authenticatable
         public ?string $organizationId = null,
         public ?string $applicationId = null,
         public ?string $environment = null,
+        public ?string $firstName = null,
+        public ?string $lastName = null,
+        public bool $banned = false,
+        public ?string $sessionId = null,
+        public ?string $organizationSlug = null,
+        public ?string $organizationRole = null,
     ) {}
 
     /**
@@ -46,7 +52,7 @@ class KoamishinUser implements Authenticatable
             roles: is_array($data['roles'] ?? null) ? $data['roles'] : [],
             permissions: is_array($data['permissions'] ?? null) ? $data['permissions'] : [],
             updatedAt: isset($data['updated_at']) ? (is_numeric($data['updated_at']) ? (int) $data['updated_at'] : (strtotime((string) $data['updated_at']) ?: null)) : null,
-            username: isset($data['preferred_username']) ? (string) $data['preferred_username'] : null,
+            username: isset($data['preferred_username']) ? (string) $data['preferred_username'] : (isset($data['username']) ? (string) $data['username'] : null),
             phoneNumber: isset($data['phone_number']) ? (string) $data['phone_number'] : null,
             phoneVerified: (bool) ($data['phone_number_verified'] ?? false),
             web3Wallet: isset($data['web3_wallet']) ? (string) $data['web3_wallet'] : null,
@@ -55,12 +61,32 @@ class KoamishinUser implements Authenticatable
             organizationId: isset($data['organization_id']) ? (string) $data['organization_id'] : null,
             applicationId: isset($data['application_id']) ? (string) $data['application_id'] : null,
             environment: isset($data['environment']) ? (string) $data['environment'] : null,
+            firstName: isset($data['first_name']) ? (string) $data['first_name'] : null,
+            lastName: isset($data['last_name']) ? (string) $data['last_name'] : null,
+            banned: (bool) ($data['banned'] ?? false),
+            sessionId: isset($data['session_id']) ? (string) $data['session_id'] : null,
+            organizationSlug: isset($data['organization_slug']) ? (string) $data['organization_slug'] : null,
+            organizationRole: isset($data['organization_role']) ? (string) $data['organization_role'] : null,
         );
     }
 
     public function hasRole(string $role): bool
     {
         return in_array($role, $this->roles, true);
+    }
+
+    /**
+     * @param  array<int, string>  $roles
+     */
+    public function hasAnyRole(array $roles): bool
+    {
+        foreach ($roles as $role) {
+            if ($this->hasRole($role)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function can(string $permission): bool

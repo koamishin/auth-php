@@ -53,11 +53,18 @@ class SessionTokenVerifier
         }
 
         $payload = strtr($parts[1], '-_', '+/');
-        $claims = json_decode((string) base64_decode($payload.str_repeat('=', (4 - strlen($payload) % 4) % 4)), true);
+        $decoded = base64_decode($payload.str_repeat('=', (4 - strlen($payload) % 4) % 4), true);
+        if (! is_string($decoded)) {
+            return false;
+        }
+
+        $claims = json_decode($decoded, true);
 
         return is_array($claims)
             && ($claims['v'] ?? null) === '2'
-            && isset($claims['sid'], $claims['fva']);
+            && is_string($claims['sid'] ?? null)
+            && $claims['sid'] !== ''
+            && isset($claims['fva']);
     }
 
     /**
@@ -74,10 +81,12 @@ class SessionTokenVerifier
             $kid = $this->peekKid($token);
 
             // A kid we do not know may mean the key set rotated since it was
-            // cached; look once more before refusing the token.
+            // cached; look once more (throttled per portal) before refusing.
             if ($kid !== null && ! array_key_exists($kid, $keys)) {
-                $this->forgetKeys();
-                $keys = $this->verificationKeys();
+                if (Cache::add($this->refreshCooldownKey(), true, 30)) {
+                    $this->forgetKeys();
+                    $keys = $this->verificationKeys();
+                }
 
                 if (! array_key_exists($kid, $keys)) {
                     throw new InvalidSessionToken('The session token was signed with an unknown key.');
@@ -109,6 +118,18 @@ class SessionTokenVerifier
             throw new InvalidSessionToken('The session token was issued by someone else.');
         }
 
+        if (! is_numeric($claims['exp'] ?? null)) {
+            throw new InvalidSessionToken('The session token has no expiration.');
+        }
+
+        if (isset($claims['iat']) && is_numeric($claims['iat']) && (int) $claims['iat'] > time() + $this->leewaySeconds) {
+            throw new InvalidSessionToken('The session token was issued in the future.');
+        }
+
+        if (($claims['v'] ?? null) !== '2' || ! is_string($claims['sid'] ?? null) || $claims['sid'] === '') {
+            throw new InvalidSessionToken('The session token is missing required session claims.');
+        }
+
         return $claims;
     }
 
@@ -124,7 +145,12 @@ class SessionTokenVerifier
         }
 
         $header = strtr($parts[0], '-_', '+/');
-        $decoded = json_decode((string) base64_decode($header.str_repeat('=', (4 - strlen($header) % 4) % 4)), true);
+        $rawHeader = base64_decode($header.str_repeat('=', (4 - strlen($header) % 4) % 4), true);
+        if (! is_string($rawHeader)) {
+            throw new InvalidSessionToken('The session token header is not valid base64.');
+        }
+
+        $decoded = json_decode($rawHeader, true);
 
         if (! is_array($decoded) || ($decoded['alg'] ?? null) !== 'RS256') {
             throw new InvalidSessionToken('The session token is not an RS256 JWT.');
@@ -143,7 +169,7 @@ class SessionTokenVerifier
         try {
             /** @var mixed $document */
             $document = Cache::remember($this->cacheKey(), $this->jwksCacheSeconds, function (): array {
-                $response = Http::connectTimeout(3)->timeout(10)->acceptJson()
+                $response = Http::connectTimeout(3)->timeout(10)->withoutRedirecting()->acceptJson()
                     ->get("{$this->portalUrl}/oauth/jwks");
 
                 if (! $response->successful()) {
@@ -158,7 +184,16 @@ class SessionTokenVerifier
                 return $document;
             });
 
-            return JWK::parseKeySet(is_array($document) ? $document : []);
+            $keys = is_array($document['keys'] ?? null) ? array_values(array_filter(
+                $document['keys'],
+                fn (mixed $jwk): bool => $this->isSupportedSigningJwk($jwk),
+            )) : [];
+
+            if ($keys === []) {
+                throw new InvalidSessionToken('Koamishin Auth returned no usable verification keys.');
+            }
+
+            return JWK::parseKeySet(['keys' => $keys]);
         } catch (InvalidSessionToken $exception) {
             throw $exception;
         } catch (Throwable $exception) {
@@ -166,9 +201,38 @@ class SessionTokenVerifier
         }
     }
 
+    protected function isSupportedSigningJwk(mixed $jwk): bool
+    {
+        if (! is_array($jwk) || ($jwk['kty'] ?? null) !== 'RSA') {
+            return false;
+        }
+
+        if (isset($jwk['use']) && $jwk['use'] !== 'sig') {
+            return false;
+        }
+
+        if (isset($jwk['alg']) && $jwk['alg'] !== 'RS256') {
+            return false;
+        }
+
+        if (! is_string($jwk['n'] ?? null) || $jwk['n'] === '') {
+            return false;
+        }
+
+        $padded = strtr($jwk['n'], '-_', '+/');
+        $modulus = base64_decode($padded.str_repeat('=', (4 - strlen($padded) % 4) % 4), true);
+
+        return is_string($modulus) && strlen($modulus) >= 256;
+    }
+
     protected function cacheKey(): string
     {
         return 'koamishin.jwks.'.sha1($this->portalUrl);
+    }
+
+    protected function refreshCooldownKey(): string
+    {
+        return 'koamishin.jwks.cooldown.'.sha1($this->portalUrl);
     }
 
     protected function forgetKeys(): void

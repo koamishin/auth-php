@@ -293,4 +293,96 @@ class KoamishinSessionTokenTest extends TestCase
         Session::put('koamishin_token_expires_at', time() + 300);
         Session::put('koamishin_user_id', 'user-1');
     }
+
+    public function test_koamishin_guard_verifies_session_tokens_offline_without_userinfo(): void
+    {
+        [$privatePem, $jwk] = $this->keyPair();
+        $token = $this->sign($this->claims(), $privatePem);
+
+        Http::fake([
+            'https://portal.test/oauth/jwks' => Http::response(['keys' => [$jwk]], 200),
+        ]);
+
+        $request = Request::create('/api/me', 'GET');
+        $request->headers->set('Authorization', 'Bearer '.$token);
+        $this->app->instance('request', $request);
+
+        $user = auth('koamishin')->user();
+
+        $this->assertNotNull($user);
+        $this->assertSame('user-1', $user->id);
+        Http::assertSentCount(1);
+    }
+
+    public function test_session_token_verifier_throttles_unknown_kid_jwks_refreshes(): void
+    {
+        [$privatePem, $jwk] = $this->keyPair();
+
+        Http::fake([
+            'https://portal.test/oauth/jwks' => Http::response(['keys' => [$jwk]], 200),
+        ]);
+
+        $verifier = new SessionTokenVerifier('https://portal.test');
+
+        for ($i = 0; $i < 3; $i++) {
+            $token = $this->sign($this->claims(), $privatePem, 'unknown-kid-'.$i);
+            try {
+                $verifier->verify($token);
+                $this->fail('Expected InvalidSessionToken for unknown kid');
+            } catch (InvalidSessionToken) {
+                // Expected
+            }
+        }
+
+        // 1 initial JWKS fetch + 1 cooldown-gated refresh, not 3+.
+        Http::assertSentCount(2);
+    }
+
+    public function test_session_token_verifier_rejects_tokens_missing_exp_or_sid(): void
+    {
+        [$privatePem, $jwk] = $this->keyPair();
+
+        Http::fake([
+            'https://portal.test/oauth/jwks' => Http::response(['keys' => [$jwk]], 200),
+        ]);
+
+        $verifier = new SessionTokenVerifier('https://portal.test');
+
+        $claimsWithoutExp = $this->claims();
+        unset($claimsWithoutExp['exp']);
+
+        $this->expectException(InvalidSessionToken::class);
+        $verifier->verify($this->sign($claimsWithoutExp, $privatePem));
+    }
+
+    public function test_logout_revokes_grant_family_and_refresh_preserves_existing_refresh_token(): void
+    {
+        $this->signedInSession();
+        Session::put('koamishin_revocation_token', Crypt::encryptString('kg1.family.secret'));
+        Session::put('koamishin_token_expires_at', time() - 10);
+
+        Http::fake([
+            'https://portal.test/oauth/token' => Http::response([
+                'access_token' => 'new-access-secret',
+                'expires_in' => 300,
+            ], 200),
+            'https://portal.test/api/oauth/userinfo' => Http::response([
+                'sub' => 'user-1',
+                'application_id' => '100',
+                'environment' => 'production',
+            ], 200),
+            'https://portal.test/api/oauth/revoke-family' => Http::response(['revoked' => true], 200),
+        ]);
+
+        $auth = $this->app->make(KoamishinAuth::class);
+        $user = $auth->user();
+
+        $this->assertNotNull($user);
+        $this->assertSame('refresh-secret', Crypt::decryptString((string) Session::get('koamishin_refresh_token')));
+
+        $auth->logout();
+
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://portal.test/api/oauth/revoke-family'
+            && $request['revocation_token'] === 'kg1.family.secret');
+    }
 }
