@@ -117,8 +117,15 @@ class KoamishinServiceProvider extends ServiceProvider
                 $auth = $app->make(KoamishinAuth::class);
                 if ($request->headers->has('Authorization')) {
                     $token = $request->bearerToken();
+                    if (! is_string($token) || $token === '') {
+                        return null;
+                    }
 
-                    return is_string($token) ? $auth->userForToken($token) : null;
+                    if (SessionTokenVerifier::isSessionToken($token)) {
+                        return $auth->userForSessionToken($token);
+                    }
+
+                    return $auth->userForToken($token);
                 }
 
                 return $request->hasSession() ? $auth->user() : null;

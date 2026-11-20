@@ -14,7 +14,17 @@ class AuthenticationController
 {
     public function login(Request $request, KoamishinAuth $auth): Response
     {
-        $returnTo = $request->query('return_to', config('koamishin.hosted_return_to'));
+        $intended = $request->hasSession() ? $request->session()->pull('url.intended') : null;
+        $intendedReturnTo = null;
+        if (is_string($intended) && $intended !== '') {
+            $parsedPath = parse_url($intended, PHP_URL_PATH);
+            $parsedQuery = parse_url($intended, PHP_URL_QUERY);
+            if (is_string($parsedPath) && $parsedPath !== '') {
+                $intendedReturnTo = $parsedPath.(is_string($parsedQuery) && $parsedQuery !== '' ? '?'.$parsedQuery : '');
+            }
+        }
+
+        $returnTo = $request->query('return_to', $intendedReturnTo ?? config('koamishin.hosted_return_to'));
         $url = $auth->getLoginUrl(is_string($returnTo) ? $returnTo : null);
 
         if ($request->header('X-Inertia')) {

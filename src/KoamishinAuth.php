@@ -115,7 +115,7 @@ class KoamishinAuth
         unset($transactions[$state]);
         Session::put('koamishin_oauth_transactions', $transactions);
 
-        $response = Http::connectTimeout(3)->timeout(10)->asForm()->post("{$this->portalUrl}/oauth/token", [
+        $response = Http::connectTimeout(3)->timeout(10)->withoutRedirecting()->asForm()->post("{$this->portalUrl}/oauth/token", [
             'grant_type' => 'authorization_code',
             'client_id' => $this->effectiveClientId(),
             'client_secret' => $this->effectiveClientSecret(),
@@ -149,6 +149,11 @@ class KoamishinAuth
         }
 
         $user = $this->userForToken($accessToken);
+        if ($user === null && $this->refresh()) {
+            $refreshed = $this->decryptSessionToken('koamishin_access_token');
+            $user = $refreshed !== null ? $this->userForToken($refreshed) : null;
+        }
+
         $userId = Session::get('koamishin_user_id');
         if ($user === null || ! is_string($userId) || ! hash_equals($userId, $user->id)) {
             $this->clearSession();
@@ -226,6 +231,9 @@ class KoamishinAuth
             'application_id' => $applicationId,
             'environment' => $environment,
             'organization_id' => is_string($organization['id'] ?? null) ? $organization['id'] : null,
+            'organization_slug' => is_string($organization['slg'] ?? null) ? $organization['slg'] : null,
+            'organization_role' => is_string($organization['rol'] ?? null) ? $organization['rol'] : null,
+            'session_id' => is_string($claims['sid'] ?? null) ? $claims['sid'] : null,
             'roles' => is_string($organization['rol'] ?? null) ? [$organization['rol']] : [],
         ]);
     }
@@ -241,7 +249,7 @@ class KoamishinAuth
 
         $this->validateApplicationContext();
 
-        $response = Http::connectTimeout(3)->timeout(10)->withToken($accessToken)
+        $response = Http::connectTimeout(3)->timeout(10)->withoutRedirecting()->withToken($accessToken)
             ->acceptJson()->get("{$this->portalUrl}/api/oauth/userinfo");
         if ($response->status() === 401 || $response->status() === 403) {
             return null;
@@ -268,10 +276,24 @@ class KoamishinAuth
     }
 
     /**
-     * Remove this application's Koamishin session; this does not revoke Portal tokens.
+     * Remove this application's Koamishin session and best-effort revoke the
+     * Portal grant family when a revocation token was issued.
      */
     public function logout(): void
     {
+        $revocationToken = $this->decryptSessionToken('koamishin_revocation_token');
+        if ($revocationToken !== null && $this->portalUrl !== '') {
+            try {
+                Http::connectTimeout(2)->timeout(5)->withoutRedirecting()->asJson()
+                    ->post("{$this->portalUrl}/api/oauth/revoke-family", [
+                        'revocation_token' => $revocationToken,
+                        'client_id' => $this->effectiveClientId(),
+                    ]);
+            } catch (\Throwable) {
+                // Local logout must always succeed even if the Portal is unreachable.
+            }
+        }
+
         $this->clearSession();
         Session::forget(['koamishin_oauth_transactions', 'koamishin_return_to']);
         Session::regenerate(true);
@@ -293,7 +315,7 @@ class KoamishinAuth
             return false;
         }
 
-        $response = Http::connectTimeout(3)->timeout(10)->asForm()->post("{$this->portalUrl}/oauth/token", [
+        $response = Http::connectTimeout(3)->timeout(10)->withoutRedirecting()->asForm()->post("{$this->portalUrl}/oauth/token", [
             'grant_type' => 'refresh_token',
             'client_id' => $this->effectiveClientId(),
             'client_secret' => $this->effectiveClientSecret(),
@@ -325,7 +347,7 @@ class KoamishinAuth
             return null;
         }
 
-        if ((int) $expiresAt <= time()) {
+        if ((int) $expiresAt <= time() + 30) {
             if (! $this->refresh()) {
                 return null;
             }
@@ -341,7 +363,7 @@ class KoamishinAuth
     }
 
     /**
-     * @return array{access_token: string, refresh_token: ?string, expires_in: int}
+     * @return array{access_token: string, refresh_token: ?string, revocation_token: ?string, expires_in: int}
      */
     protected function validatedTokens(Response $response): array
     {
@@ -357,12 +379,13 @@ class KoamishinAuth
         return [
             'access_token' => $data['access_token'],
             'refresh_token' => is_string($data['refresh_token'] ?? null) && $data['refresh_token'] !== '' ? $data['refresh_token'] : null,
+            'revocation_token' => is_string($data['revocation_token'] ?? null) && $data['revocation_token'] !== '' ? $data['revocation_token'] : null,
             'expires_in' => (int) $expiresIn,
         ];
     }
 
     /**
-     * @param  array{access_token: string, refresh_token: ?string, expires_in: int}  $tokens
+     * @param  array{access_token: string, refresh_token: ?string, revocation_token?: ?string, expires_in: int}  $tokens
      */
     protected function storeTokens(array $tokens): void
     {
@@ -370,8 +393,9 @@ class KoamishinAuth
         Session::put('koamishin_token_expires_at', time() + $tokens['expires_in']);
         if ($tokens['refresh_token'] !== null) {
             Session::put('koamishin_refresh_token', Crypt::encryptString($tokens['refresh_token']));
-        } else {
-            Session::forget('koamishin_refresh_token');
+        }
+        if (is_string($tokens['revocation_token'] ?? null) && $tokens['revocation_token'] !== '') {
+            Session::put('koamishin_revocation_token', Crypt::encryptString($tokens['revocation_token']));
         }
     }
 
@@ -393,7 +417,14 @@ class KoamishinAuth
 
     protected function clearSession(): void
     {
-        Session::forget(['koamishin_user', 'koamishin_user_id', 'koamishin_access_token', 'koamishin_refresh_token', 'koamishin_token_expires_at']);
+        Session::forget([
+            'koamishin_user',
+            'koamishin_user_id',
+            'koamishin_access_token',
+            'koamishin_refresh_token',
+            'koamishin_revocation_token',
+            'koamishin_token_expires_at',
+        ]);
     }
 
     protected function effectiveClientId(): string

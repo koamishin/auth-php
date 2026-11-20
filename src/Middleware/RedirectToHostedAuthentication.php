@@ -37,6 +37,10 @@ class RedirectToHostedAuthentication
             ? $auth->getRegistrationUrl($returnTo)
             : $auth->getLoginUrl($returnTo);
 
+        if ($request->header('X-Inertia')) {
+            return response('', 409)->header('X-Inertia-Location', $url);
+        }
+
         return redirect()->away($url);
     }
 

@@ -270,4 +270,32 @@ class KoamishinManagementClientTest extends TestCase
 
         Http::assertNothingSent();
     }
+
+    public function test_caches_client_credentials_token_and_supports_user_lifecycle_methods(): void
+    {
+        Http::fake([
+            'https://portal.test/oauth/token' => Http::response(['access_token' => 'cached-machine-token', 'expires_in' => 300]),
+            'https://portal.test/api/v1/users' => Http::response(['data' => ['id' => '99', 'name' => 'Grace Hopper', 'email' => 'grace@example.test']], 201),
+            'https://portal.test/api/v1/users/99' => Http::sequence()
+                ->push(['data' => ['id' => '99', 'name' => 'Grace Murray Hopper', 'email' => 'grace@example.test']], 200)
+                ->push([], 204),
+            'https://portal.test/api/v1/users/99/ban' => Http::response(['data' => ['id' => '99', 'name' => 'Grace Murray Hopper', 'email' => 'grace@example.test', 'banned' => true]], 200),
+            'https://portal.test/api/v1/users/99/unban' => Http::response(['data' => ['id' => '99', 'name' => 'Grace Murray Hopper', 'email' => 'grace@example.test', 'banned' => false]], 200),
+        ]);
+
+        $client = app(KoamishinManagementClient::class);
+        $created = $client->createUser(['name' => 'Grace Hopper', 'email' => 'grace@example.test']);
+        $updated = $client->updateUser('99', ['name' => 'Grace Murray Hopper']);
+        $banned = $client->banUser('99', 'Review');
+        $unbanned = $client->unbanUser('99');
+        $client->deleteUser('99');
+
+        $this->assertSame('99', $created->id);
+        $this->assertSame('Grace Murray Hopper', $updated->name);
+        $this->assertTrue($banned->banned);
+        $this->assertFalse($unbanned->banned);
+
+        $tokenCalls = Http::recorded()->filter(fn (array $pair): bool => $pair[0]->url() === 'https://portal.test/oauth/token')->count();
+        $this->assertSame(1, $tokenCalls);
+    }
 }

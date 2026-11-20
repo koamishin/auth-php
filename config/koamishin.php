@@ -48,7 +48,7 @@ return [
     'webhook_secret' => env('KOAMISHIN_WEBHOOK_SECRET', ''),
 
     // Legacy uses the literal secret. Standard expects a base64-encoded whsec_ secret.
-    'webhook_format' => env('KOAMISHIN_WEBHOOK_FORMAT', 'legacy'),
+    'webhook_format' => env('KOAMISHIN_WEBHOOK_FORMAT', 'standard'),
 
     'scopes' => ['openid', 'profile', 'email', 'roles', 'metadata:public'],
 
